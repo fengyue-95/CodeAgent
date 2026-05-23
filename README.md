@@ -11,7 +11,7 @@ CodeAgent 是一个本地代码智能索引底座，用来支撑后续的 code a
 - 提取 Java 的 package、import、class、interface、enum、field、method、constructor。
 - 提取方法调用候选，并基于字段、参数、局部变量类型解析常见调用，例如 `service.execute()`。
 - 将文件、符号节点、关系边、未解析引用写入本地 SQLite。
-- 提供 CLI 命令：`index`、`sync`、`stats`、`search`、`node`、`context`、`callers`、`callees`、`refs`、`references`、`serve`。
+- 提供 CLI 命令：`index`、`sync`、`stats`、`unresolved`、`search`、`node`、`context`、`callers`、`callees`、`refs`、`references`、`serve`。
 - 提供第一版 MCP stdio server，方便模型通过工具调用访问索引能力。
 
 ## 当前状态
@@ -132,6 +132,22 @@ code-agent stats
 ```
 
 查看当前索引状态，包括项目路径、数据库路径、文件数量、节点数量、边数量、未解析引用数量、最近索引时间。通常用于确认 `index` 是否执行成功。
+
+其中 `Unresolved refs` 表示当前仍未解析成功的引用。已经成功解析成边的引用会从未解析表中清理掉。
+
+```bash
+code-agent unresolved
+```
+
+查看当前剩余未解析引用的分布，包括总数、按引用类型分组的数量，以及出现次数最多的未解析引用名称。这个命令主要用于诊断 resolver 下一步应该优先优化什么。
+
+示例：
+
+```bash
+code-agent unresolved
+code-agent unresolved 50
+code-agent unresolved --limit 50
+```
 
 ```bash
 code-agent sync
@@ -254,6 +270,13 @@ code-agent stats [projectPath]
 ```
 
 查看指定项目的索引统计信息。
+
+```bash
+code-agent unresolved [limit] [projectPath]
+code-agent unresolved --limit <limit> [projectPath]
+```
+
+查看指定项目中未解析引用的统计摘要。`limit` 用来控制输出的热门未解析引用数量，默认是 `20`。
 
 ```bash
 code-agent search <query> [projectPath]

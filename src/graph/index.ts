@@ -92,7 +92,11 @@ export class GraphQueryService {
   }
 
   private collectRelatedFiles(nodes: CodeNode[]): string[] {
-    return Array.from(new Set(nodes.map((node) => node.filePath))).sort();
+    return Array.from(new Set(
+      nodes
+        .filter((node) => node.metadata?.external !== true)
+        .map((node) => node.filePath)
+    )).sort();
   }
 
   private findIncomingRelatedNodes(targets: CodeNode[], edgeKinds: EdgeKind[]): RelatedNode[] {

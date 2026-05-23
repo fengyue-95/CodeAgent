@@ -5,7 +5,6 @@ import { ProjectScanner } from '../scanner';
 import { GraphStore } from '../store/queries';
 import { detectLanguage } from '../utils/language';
 import { ReferenceResolver } from '../resolver';
-import { EdgeKind } from '../types';
 
 export interface IndexService {
   indexAll(root: string): Promise<void>;
@@ -13,16 +12,6 @@ export interface IndexService {
 }
 
 export class CodeIndexService implements IndexService {
-  private static readonly resolvedEdgeKinds: EdgeKind[] = [
-    'calls',
-    'imports',
-    'references',
-    'extends',
-    'implements',
-    'type_of',
-    'returns',
-  ];
-
   constructor(
     private readonly scanner: ProjectScanner,
     private readonly parsers: LanguageParser[],
@@ -67,9 +56,22 @@ export class CodeIndexService implements IndexService {
   }
 
   private async rebuildResolvedEdges(): Promise<void> {
-    this.store.deleteEdgesByKinds(CodeIndexService.resolvedEdgeKinds);
     const unresolvedRefs = this.store.getAllUnresolvedRefs();
-    const resolvedEdges = await this.resolver.resolve(unresolvedRefs);
-    this.store.insertEdges(resolvedEdges);
+    const result = this.resolver.resolveDetailed
+      ? await this.resolver.resolveDetailed(unresolvedRefs)
+      : {
+        edges: await this.resolver.resolve(unresolvedRefs),
+        resolvedRefs: [],
+        nodes: [],
+      };
+
+    this.store.insertNodes(result.nodes ?? []);
+    this.store.insertEdges(result.edges);
+    this.store.deleteUnresolvedRefsByIds(
+      result.resolvedRefs
+        .map((ref) => ref.id)
+        .filter((id): id is number => typeof id === 'number')
+    );
+    this.store.deleteOrphanExternalNodes();
   }
 }

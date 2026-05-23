@@ -14,6 +14,7 @@ type Command =
   | 'index'
   | 'sync'
   | 'stats'
+  | 'unresolved'
   | 'search'
   | 'node'
   | 'context'
@@ -31,6 +32,7 @@ function usage(): string {
     '  index   Build or rebuild the local code graph index',
     '  sync    Sync changed files into the local index',
     '  stats   Show local index statistics',
+    '  unresolved Show unresolved reference summary',
     '  search  Search symbols by name',
     '  node    Show details for a symbol or node id',
     '  context Build a small graph context for a query',
@@ -63,6 +65,10 @@ function formatTimestamp(value?: number): string {
 function formatNode(node: CodeNode): string {
   const qualifiedName = node.qualifiedName ?? node.name;
   const signature = node.signature ? ` ${node.signature}` : '';
+  if (node.metadata?.external === true) {
+    return `${node.kind} ${qualifiedName}${signature} (external)`;
+  }
+
   return `${node.kind} ${qualifiedName}${signature} (${node.filePath}:${node.startLine})`;
 }
 
@@ -77,12 +83,56 @@ function printNodes(nodes: CodeNode[]): void {
   }
 }
 
+function parseLimit(value: string | undefined, fallback = 20): number {
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    throw new Error(`Invalid limit: ${value}`);
+  }
+
+  return parsed;
+}
+
+function parseUnresolvedArgs(args: string[]): { limit: number; projectArg?: string } {
+  const [first, second, third] = args;
+
+  if (first === '--limit' || first === '-n') {
+    return {
+      limit: parseLimit(second),
+      projectArg: third,
+    };
+  }
+
+  if (first?.startsWith('--limit=')) {
+    return {
+      limit: parseLimit(first.slice('--limit='.length)),
+      projectArg: second,
+    };
+  }
+
+  const firstAsNumber = first ? Number(first) : Number.NaN;
+  if (first && Number.isInteger(firstAsNumber) && firstAsNumber > 0) {
+    return {
+      limit: firstAsNumber,
+      projectArg: second,
+    };
+  }
+
+  return {
+    limit: 20,
+    projectArg: first,
+  };
+}
+
 function printNodeDetails(node: CodeNode): void {
   console.log(`id: ${node.id}`);
   console.log(`kind: ${node.kind}`);
   console.log(`name: ${node.name}`);
   console.log(`qualifiedName: ${node.qualifiedName ?? 'n/a'}`);
-  console.log(`file: ${node.filePath}:${node.startLine}:${node.startColumn}`);
+  console.log(`file: ${node.metadata?.external === true ? 'external' : `${node.filePath}:${node.startLine}:${node.startColumn}`}`);
   console.log(`range: ${node.startLine}:${node.startColumn} - ${node.endLine}:${node.endColumn}`);
   console.log(`language: ${node.language}`);
   console.log(`signature: ${node.signature ?? 'n/a'}`);
@@ -207,6 +257,43 @@ function runStats(projectArg?: string): void {
     console.log(`Edges: ${stats.edgeCount}`);
     console.log(`Unresolved refs: ${stats.unresolvedRefCount}`);
     console.log(`Last indexed: ${formatTimestamp(stats.lastIndexedAt)}`);
+  } finally {
+    store.close();
+  }
+}
+
+function runUnresolved(args: string[]): void {
+  const { limit, projectArg } = parseUnresolvedArgs(args);
+  const paths = resolveProjectPaths(projectArg);
+  ensureStateDir(paths.stateDir);
+  const store = createStore(paths.dbPath);
+  try {
+    const stats = store.getStats();
+    const byKind = store.getUnresolvedStatsByKind();
+    const topRefs = store.getTopUnresolvedRefs(limit);
+
+    console.log(`Project: ${paths.root}`);
+    console.log(`Total unresolved refs: ${stats.unresolvedRefCount}`);
+    console.log('');
+
+    console.log('By kind:');
+    if (byKind.length === 0) {
+      console.log('No unresolved refs.');
+    } else {
+      for (const row of byKind) {
+        console.log(`${row.refKind.padEnd(12)} ${row.count}`);
+      }
+    }
+
+    console.log('');
+    console.log(`Top refs (limit ${limit}):`);
+    if (topRefs.length === 0) {
+      console.log('No unresolved refs.');
+    } else {
+      for (const row of topRefs) {
+        console.log(`${row.refName.padEnd(40)} ${row.refKind.padEnd(12)} ${row.count}`);
+      }
+    }
   } finally {
     store.close();
   }
@@ -356,13 +443,29 @@ async function main(): Promise<void> {
   const rawCommand = process.argv[2];
   const firstArg = process.argv[3];
   const projectArg = process.argv[4];
+  const restArgs = process.argv.slice(3);
 
   if (!rawCommand || rawCommand === '--help' || rawCommand === '-h') {
     console.log(usage());
     return;
   }
 
-  if (!['index', 'sync', 'stats', 'search', 'node', 'context', 'serve', 'callers', 'callees', 'refs', 'references'].includes(rawCommand)) {
+  if (
+    ![
+      'index',
+      'sync',
+      'stats',
+      'unresolved',
+      'search',
+      'node',
+      'context',
+      'serve',
+      'callers',
+      'callees',
+      'refs',
+      'references',
+    ].includes(rawCommand)
+  ) {
     console.error(`Unknown command: ${rawCommand}`);
     console.error('');
     console.error(usage());
@@ -379,6 +482,11 @@ async function main(): Promise<void> {
 
   if (command === 'sync') {
     await runSync(firstArg);
+    return;
+  }
+
+  if (command === 'unresolved') {
+    runUnresolved(restArgs);
     return;
   }
 

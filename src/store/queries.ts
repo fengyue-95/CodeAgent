@@ -9,6 +9,8 @@ import {
   IndexStats,
   NodeKind,
   UnresolvedRef,
+  UnresolvedKindStat,
+  UnresolvedNameStat,
 } from '../types';
 
 export interface GraphStore {
@@ -28,6 +30,7 @@ export interface GraphStore {
   searchNodes(query: string, limit?: number): CodeNode[];
   getNodesByKind(kind: NodeKind): CodeNode[];
   deleteNodesByFile(filePath: string): void;
+  deleteOrphanExternalNodes(): void;
 
   insertEdges(edges: CodeEdge[]): void;
   getOutgoingEdges(nodeId: string, kinds?: EdgeKind[]): CodeEdge[];
@@ -39,6 +42,9 @@ export interface GraphStore {
   getAllUnresolvedRefs(): UnresolvedRef[];
   getUnresolvedRefsByFile(filePath: string): UnresolvedRef[];
   getUnresolvedRefsByName(name: string): UnresolvedRef[];
+  getUnresolvedStatsByKind(): UnresolvedKindStat[];
+  getTopUnresolvedRefs(limit?: number): UnresolvedNameStat[];
+  deleteUnresolvedRefsByIds(ids: number[]): void;
   deleteUnresolvedRefsByFile(filePath: string): void;
 
   replaceFileGraph(input: {
@@ -325,6 +331,18 @@ export class SqliteGraphStore implements GraphStore {
     this.db.prepare('DELETE FROM nodes WHERE file_path = ?').run(filePath);
   }
 
+  deleteOrphanExternalNodes(): void {
+    this.db.prepare(`
+      DELETE FROM nodes
+      WHERE (file_path = '<external>' OR json_extract(metadata, '$.external') = 1)
+        AND NOT EXISTS (
+          SELECT 1 FROM edges
+          WHERE edges.source = nodes.id
+             OR edges.target = nodes.id
+        )
+    `).run();
+  }
+
   insertEdges(edges: CodeEdge[]): void {
     const stmt = this.db.prepare(`
       INSERT INTO edges (
@@ -439,6 +457,50 @@ export class SqliteGraphStore implements GraphStore {
       .all(name);
 
     return rows.map(rowToUnresolvedRef);
+  }
+
+  getUnresolvedStatsByKind(): UnresolvedKindStat[] {
+    const rows = this.db
+      .prepare(`
+        SELECT ref_kind AS refKind, COUNT(*) AS count
+        FROM unresolved_refs
+        GROUP BY ref_kind
+        ORDER BY count DESC, ref_kind
+      `)
+      .all() as UnresolvedKindStat[];
+
+    return rows;
+  }
+
+  getTopUnresolvedRefs(limit = 20): UnresolvedNameStat[] {
+    const rows = this.db
+      .prepare(`
+        SELECT ref_name AS refName, ref_kind AS refKind, COUNT(*) AS count
+        FROM unresolved_refs
+        GROUP BY ref_name, ref_kind
+        ORDER BY count DESC, ref_name, ref_kind
+        LIMIT ?
+      `)
+      .all(limit) as UnresolvedNameStat[];
+
+    return rows;
+  }
+
+  deleteUnresolvedRefsByIds(ids: number[]): void {
+    if (ids.length === 0) {
+      return;
+    }
+
+    const batchSize = 500;
+    const tx = this.db.transaction((items: number[]) => {
+      for (let index = 0; index < items.length; index += batchSize) {
+        const batch = items.slice(index, index + batchSize);
+        const placeholders = batch.map(() => '?').join(', ');
+        this.db.prepare(`DELETE FROM unresolved_refs WHERE id IN (${placeholders})`).run(...batch);
+      }
+    });
+
+    tx(ids);
   }
 
   deleteUnresolvedRefsByFile(filePath: string): void {

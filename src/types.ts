@@ -81,6 +81,17 @@ export interface UnresolvedRef {
   metadata?: Record<string, unknown>;
 }
 
+export interface UnresolvedKindStat {
+  refKind: UnresolvedRef['refKind'];
+  count: number;
+}
+
+export interface UnresolvedNameStat {
+  refName: string;
+  refKind: UnresolvedRef['refKind'];
+  count: number;
+}
+
 export interface ParseResult {
   file: FileRecord;
   nodes: CodeNode[];

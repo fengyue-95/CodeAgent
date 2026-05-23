@@ -492,16 +492,37 @@ class JavaExtractor {
   }
 
   private extractParameters(parametersNode: SyntaxNode): JavaVariable[] {
-    const text = getNodeText(this.source, parametersNode);
-    const matches = [...text.matchAll(/([A-Z][A-Za-z0-9_<>.?]+|[a-z][A-Za-z0-9_<>.?]+)\s+([A-Za-z_][A-Za-z0-9_]*)/g)];
-    return matches
-      .map((match) => ({
-        type: match[1] ?? '',
-        name: match[2] ?? '',
-        line: parametersNode.startPosition.row + 1,
-        column: parametersNode.startPosition.column + (match.index ?? 0),
-      }))
+    const parameterNodes = this.collectParameterNodes(parametersNode);
+    return parameterNodes
+      .map((parameterNode) => {
+        const typeNode = getChildByField(parameterNode, 'type');
+        const nameNode = getChildByField(parameterNode, 'name') ??
+          namedChildren(parameterNode).find((child) => child.type === 'identifier');
+        const type = normalizeWhitespace(getNodeText(this.source, typeNode)).replace(/\s*\.\.\.$/, '');
+        const name = getNodeText(this.source, nameNode);
+
+        return {
+          type,
+          name,
+          line: typeNode?.startPosition.row ?? parameterNode.startPosition.row + 1,
+          column: typeNode?.startPosition.column ?? parameterNode.startPosition.column,
+        };
+      })
       .filter((parameter) => parameter.type && parameter.name);
+  }
+
+  private collectParameterNodes(node: SyntaxNode): SyntaxNode[] {
+    const results: SyntaxNode[] = [];
+    for (const child of namedChildren(node)) {
+      if (child.type === 'formal_parameter' || child.type === 'spread_parameter') {
+        results.push(child);
+        continue;
+      }
+
+      results.push(...this.collectParameterNodes(child));
+    }
+
+    return results;
   }
 
   private extractMethodInvocation(node: SyntaxNode): void {
