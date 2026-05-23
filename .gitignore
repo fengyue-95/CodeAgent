@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.npm-cache/
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+.code-agent/

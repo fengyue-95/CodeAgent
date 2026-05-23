@@ -1,0 +1,26 @@
+{
+  "name": "code-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A code agent foundation with code graph indexing and MCP-ready query layers.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "code-agent": "dist/bin/code-agent.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-schema.js && node scripts/chmod-bin.js",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "cli": "npm run build && node dist/bin/code-agent.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1",
+    "tree-sitter-wasms": "^0.1.11",
+    "web-tree-sitter": "^0.25.10"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.10.1",
+    "typescript": "^5.9.3"
+  }
+}
