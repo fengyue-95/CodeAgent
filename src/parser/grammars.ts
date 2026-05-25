@@ -4,6 +4,9 @@ import { Language } from '../types';
 
 const WASM_GRAMMARS: Partial<Record<Language, string>> = {
   java: 'tree-sitter-java.wasm',
+  javascript: 'tree-sitter-javascript.wasm',
+  typescript: 'tree-sitter-typescript.wasm',
+  python: 'tree-sitter-python.wasm',
 };
 
 const languageCache = new Map<Language, WasmLanguage>();

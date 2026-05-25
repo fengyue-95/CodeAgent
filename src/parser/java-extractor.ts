@@ -11,6 +11,7 @@ import {
   UnresolvedRef,
 } from '../types';
 import { sha256 } from '../utils/hash';
+import { children, getChildByField, getNodeText, lastQualifiedSegment, namedChildren, normalizeWhitespace } from './common';
 
 interface ContainerFrame {
   id: string;
@@ -24,39 +25,6 @@ interface JavaVariable {
   type: string;
   line: number;
   column: number;
-}
-
-function getNodeText(source: string, node: SyntaxNode | null | undefined): string {
-  if (!node) {
-    return '';
-  }
-
-  return source.slice(node.startIndex, node.endIndex);
-}
-
-function getChildByField(node: SyntaxNode, name: string): SyntaxNode | null {
-  return node.childForFieldName(name);
-}
-
-function normalizeWhitespace(value: string): string {
-  return value.replace(/\s+/g, ' ').trim();
-}
-
-function lastQualifiedSegment(value: string): string {
-  const parts = value.split('.');
-  return parts[parts.length - 1] ?? value;
-}
-
-function isNode(value: SyntaxNode | null): value is SyntaxNode {
-  return value !== null;
-}
-
-function namedChildren(node: SyntaxNode): SyntaxNode[] {
-  return node.namedChildren.filter(isNode);
-}
-
-function children(node: SyntaxNode): SyntaxNode[] {
-  return node.children.filter(isNode);
 }
 
 function getQualifiedName(

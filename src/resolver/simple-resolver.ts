@@ -2,10 +2,12 @@ import { ReferenceResolver } from './index';
 import { CodeEdge, CodeNode, EdgeKind, UnresolvedRef } from '../types';
 import { GraphStore } from '../store/queries';
 import { ResolveResult } from './index';
+import path from 'node:path';
 
 interface FileImportIndex {
   exactImports: Map<string, string>;
   wildcardImports: string[];
+  aliases: Map<string, CodeNode[]>;
 }
 
 const JAVA_PRIMITIVE_TYPES = new Set([
@@ -206,10 +208,48 @@ export class SimpleResolver implements ReferenceResolver {
   }
 
   private findTargets(sourceNode: CodeNode, unresolvedRef: UnresolvedRef): CodeNode[] {
+    if (unresolvedRef.refKind === 'import') {
+      const importTargets = this.findImportTargets(sourceNode, unresolvedRef);
+      if (importTargets.length > 0) {
+        return importTargets;
+      }
+    }
+
     if (unresolvedRef.refKind === 'call') {
+      const aliasTargets = this.findCallTargetsByImportAlias(sourceNode, unresolvedRef);
+      if (aliasTargets.length > 0) {
+        return aliasTargets;
+      }
+
+      const wildcardTargets = this.findTargetsByWildcardImport(sourceNode, this.extractSimpleName(unresolvedRef.refName), [
+        'function',
+        'method',
+        'constructor',
+        'class',
+      ]);
+      if (wildcardTargets.length > 0) {
+        return wildcardTargets;
+      }
+
       const receiverTargets = this.findCallTargetsByReceiver(sourceNode, unresolvedRef);
       if (receiverTargets.length > 0) {
         return receiverTargets;
+      }
+    }
+
+    if (unresolvedRef.refKind === 'type' || unresolvedRef.refKind === 'inheritance') {
+      const aliasTargets = this.findTypeTargetsByImportAlias(sourceNode, unresolvedRef);
+      if (aliasTargets.length > 0) {
+        return aliasTargets;
+      }
+
+      const wildcardTargets = this.findTargetsByWildcardImport(
+        sourceNode,
+        this.normalizeTypeReference(unresolvedRef.refName),
+        ['class', 'interface', 'enum']
+      );
+      if (wildcardTargets.length > 0) {
+        return wildcardTargets;
       }
     }
 
@@ -233,7 +273,12 @@ export class SimpleResolver implements ReferenceResolver {
       .filter((node) => node.id !== sourceNode.id);
 
     if (unresolvedRef.refKind === 'call') {
-      return uniqueById(nameMatches.filter((node) => node.kind === 'method' || node.kind === 'constructor'));
+      return uniqueById(nameMatches.filter((node) =>
+        node.kind === 'function' ||
+        node.kind === 'method' ||
+        node.kind === 'constructor' ||
+        node.kind === 'class'
+      ));
     }
 
     if (unresolvedRef.refKind === 'inheritance') {
@@ -256,6 +301,182 @@ export class SimpleResolver implements ReferenceResolver {
     }
 
     return this.findMethodsOnType(receiverType, methodName);
+  }
+
+  private findCallTargetsByImportAlias(sourceNode: CodeNode, unresolvedRef: UnresolvedRef): CodeNode[] {
+    const aliasName = unresolvedRef.refName.split('.')[0];
+    if (!aliasName) {
+      return [];
+    }
+
+    const importIndex = this.importIndexByFile.get(sourceNode.filePath);
+    const aliasTargets = importIndex?.aliases.get(aliasName) ?? [];
+    if (aliasTargets.length === 0) {
+      return [];
+    }
+
+    if (!unresolvedRef.refName.includes('.')) {
+      return aliasTargets;
+    }
+
+    const methodName = this.getMetadataString(unresolvedRef.metadata?.methodName) ?? this.extractSimpleName(unresolvedRef.refName);
+    const methods: CodeNode[] = [];
+    for (const target of aliasTargets) {
+      if (target.kind === 'class' || target.kind === 'interface' || target.kind === 'enum') {
+        methods.push(...this.findMethodsOnType(target.qualifiedName ?? target.name, methodName));
+      }
+    }
+
+    return uniqueById(methods);
+  }
+
+  private findTypeTargetsByImportAlias(sourceNode: CodeNode, unresolvedRef: UnresolvedRef): CodeNode[] {
+    const typeName = this.normalizeTypeReference(unresolvedRef.refName);
+    const importIndex = this.importIndexByFile.get(sourceNode.filePath);
+    return importIndex?.aliases.get(typeName) ?? [];
+  }
+
+  private findTargetsByWildcardImport(sourceNode: CodeNode, name: string, kinds: CodeNode['kind'][]): CodeNode[] {
+    const importIndex = this.importIndexByFile.get(sourceNode.filePath);
+    const wildcardTargets = importIndex?.aliases.get('*') ?? [];
+    if (wildcardTargets.length === 0) {
+      return [];
+    }
+
+    const matched: CodeNode[] = [];
+    for (const target of wildcardTargets) {
+      if (target.kind === 'file') {
+        matched.push(
+          ...this.store
+            .getNodesByFile(target.filePath)
+            .filter((node) => node.name === name && kinds.includes(node.kind))
+        );
+      } else if (target.name === name && kinds.includes(target.kind)) {
+        matched.push(target);
+      }
+    }
+
+    return uniqueById(matched);
+  }
+
+
+  private findImportTargets(sourceNode: CodeNode, unresolvedRef: UnresolvedRef): CodeNode[] {
+    if (sourceNode.language === 'javascript' || sourceNode.language === 'typescript') {
+      return this.findScriptImportTargets(sourceNode, unresolvedRef);
+    }
+
+    if (sourceNode.language === 'python') {
+      return this.findPythonImportTargets(unresolvedRef);
+    }
+
+    return [];
+  }
+
+  private findScriptImportTargets(sourceNode: CodeNode, unresolvedRef: UnresolvedRef): CodeNode[] {
+    if (!unresolvedRef.refName.startsWith('.')) {
+      return [];
+    }
+
+    const candidates = this.scriptImportFileCandidates(sourceNode.filePath, unresolvedRef.refName);
+    return this.findImportedNodesByFiles(candidates, unresolvedRef);
+  }
+
+  private findPythonImportTargets(unresolvedRef: UnresolvedRef): CodeNode[] {
+    const moduleName = this.getMetadataString(unresolvedRef.metadata?.moduleName) ??
+      unresolvedRef.refName.split('.').slice(0, -1).join('.');
+    if (!moduleName) {
+      return [];
+    }
+
+    const candidates = this.pythonModuleFileCandidates(moduleName);
+    return this.findImportedNodesByFiles(candidates, unresolvedRef);
+  }
+
+  private findImportedNodesByFiles(fileCandidates: string[], unresolvedRef: UnresolvedRef): CodeNode[] {
+    for (const filePath of fileCandidates) {
+      const fileNode = this.store.getNodeById(`file:${filePath}`);
+      if (!fileNode) {
+        continue;
+      }
+
+      const importedNames = this.getMetadataStringArray(unresolvedRef.metadata?.importedNames);
+      if (importedNames.length === 0 || importedNames.includes('*')) {
+        return [fileNode];
+      }
+
+      const fileNodes = this.store.getNodesByFile(filePath);
+      const namedTargets = fileNodes.filter((node) =>
+        importedNames.includes(node.name) &&
+        node.kind !== 'file' &&
+        node.kind !== 'module'
+      );
+      const reExportTargets = this.findReExportedNodes(filePath, importedNames);
+
+      return namedTargets.length > 0 || reExportTargets.length > 0
+        ? uniqueById([...namedTargets, ...reExportTargets])
+        : [fileNode];
+    }
+
+    return [];
+  }
+
+  private findReExportedNodes(filePath: string, importedNames: string[]): CodeNode[] {
+    const refs = this.store.getUnresolvedRefsByFile(filePath).filter((ref) =>
+      ref.refKind === 'import' &&
+      ref.metadata?.isReExport === true
+    );
+    const targets: CodeNode[] = [];
+
+    for (const ref of refs) {
+      const aliases = this.getMetadataRecord(ref.metadata?.importAliases);
+      const targetNames = importedNames.includes('*')
+        ? this.getMetadataStringArray(ref.metadata?.importedNames)
+        : importedNames
+          .map((name) => aliases[name] ?? name)
+          .filter(Boolean);
+      if (targetNames.length === 0) {
+        continue;
+      }
+
+      const sourceNode = this.store.getNodeById(ref.fromNodeId);
+      if (!sourceNode) {
+        continue;
+      }
+
+      targets.push(
+        ...this.findImportTargets(sourceNode, {
+          ...ref,
+          metadata: {
+            ...ref.metadata,
+            importedNames: targetNames,
+          },
+        })
+      );
+    }
+
+    return uniqueById(targets);
+  }
+
+  private scriptImportFileCandidates(fromFilePath: string, importPath: string): string[] {
+    const fromDir = path.posix.dirname(fromFilePath.replace(/\\/g, '/'));
+    const rawPath = path.posix.normalize(path.posix.join(fromDir, importPath));
+    const extensions = ['', '.ts', '.tsx', '.js', '.mjs', '.cjs'];
+    const candidates = extensions.map((extension) => `${rawPath}${extension}`);
+
+    return [
+      ...candidates,
+      ...['index.ts', 'index.tsx', 'index.js', 'index.mjs', 'index.cjs'].map((fileName) =>
+        path.posix.join(rawPath, fileName)
+      ),
+    ];
+  }
+
+  private pythonModuleFileCandidates(moduleName: string): string[] {
+    const modulePath = moduleName.replace(/\./g, '/');
+    return [
+      `${modulePath}.py`,
+      path.posix.join(modulePath, '__init__.py'),
+    ];
   }
 
   private createExternalTargets(sourceNode: CodeNode, unresolvedRef: UnresolvedRef): CodeNode[] {
@@ -285,7 +506,11 @@ export class SimpleResolver implements ReferenceResolver {
       ? `${this.normalizeExternalType(receiverType)}.${methodName}`
       : receiver
         ? unresolvedRef.refName
-        : `${ownerType?.qualifiedName ?? '<unknown>'}.${methodName}`;
+        : sourceNode.language !== 'java'
+          ? methodName
+          : ownerType?.qualifiedName
+          ? `${ownerType.qualifiedName}.${methodName}`
+          : methodName;
 
     return [
       this.createExternalMethodNode(targetName, methodName, unresolvedRef, {
@@ -522,12 +747,30 @@ export class SimpleResolver implements ReferenceResolver {
       const fileIndex = index.get(ref.filePath) ?? {
         exactImports: new Map<string, string>(),
         wildcardImports: [],
+        aliases: new Map<string, CodeNode[]>(),
       };
 
       if (ref.metadata?.isWildcard === true) {
         fileIndex.wildcardImports.push(importName);
       } else {
         fileIndex.exactImports.set(this.extractSimpleName(importName), importName);
+      }
+
+      const sourceNode = this.store.getNodeById(ref.fromNodeId);
+      const aliasTargets = sourceNode ? this.findImportTargets(sourceNode, ref) : [];
+      const aliases = this.getMetadataRecord(ref.metadata?.importAliases);
+      for (const [aliasName, importedName] of Object.entries(aliases)) {
+        const directTargets = importedName === '*'
+          ? aliasTargets
+          : aliasTargets.filter((node) =>
+            node.name === importedName ||
+            node.name === aliasName ||
+            node.metadata?.default === true
+          );
+        const targets = directTargets.length > 0 ? directTargets : aliasTargets;
+        if (targets.length > 0) {
+          fileIndex.aliases.set(aliasName, uniqueById(targets));
+        }
       }
 
       index.set(ref.filePath, fileIndex);
@@ -632,5 +875,22 @@ export class SimpleResolver implements ReferenceResolver {
 
   private getMetadataString(value: unknown): string | null {
     return typeof value === 'string' && value.length > 0 ? value : null;
+  }
+
+  private getMetadataStringArray(value: unknown): string[] {
+    return Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === 'string' && item.length > 0)
+      : [];
+  }
+
+  private getMetadataRecord(value: unknown): Record<string, string> {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return {};
+    }
+
+    const entries = Object.entries(value).filter((entry): entry is [string, string] =>
+      typeof entry[0] === 'string' && typeof entry[1] === 'string'
+    );
+    return Object.fromEntries(entries);
   }
 }

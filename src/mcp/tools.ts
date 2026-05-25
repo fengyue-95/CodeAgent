@@ -102,6 +102,10 @@ interface ToolArgs {
   projectPath?: unknown;
 }
 
+export interface McpToolRuntime {
+  beforeToolCall?: (projectPath?: string) => Promise<void>;
+}
+
 function assertString(value: unknown, name: string): string {
   if (typeof value !== 'string' || value.trim().length === 0) {
     throw new Error(`Missing or invalid ${name}`);
@@ -114,8 +118,11 @@ function getProjectPath(value: unknown): string | undefined {
   return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
 }
 
-export function callMcpTool(name: string, args: ToolArgs = {}): unknown {
-  const paths = resolveProjectPaths(getProjectPath(args.projectPath));
+export async function callMcpTool(name: string, args: ToolArgs = {}, runtime: McpToolRuntime = {}): Promise<unknown> {
+  const projectArg = getProjectPath(args.projectPath);
+  await runtime.beforeToolCall?.(projectArg);
+
+  const paths = resolveProjectPaths(projectArg);
   ensureStateDir(paths.stateDir);
   const store = createStore(paths.dbPath);
 

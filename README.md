@@ -2,27 +2,36 @@
 
 CodeAgent 是一个本地代码智能索引底座，用来支撑后续的 code agent 能力。它会扫描代码仓库，用 tree-sitter 解析源码，把符号、文件、调用关系、引用关系等信息写入本地 SQLite 图数据库，然后通过 CLI 提供索引和查询能力。
 
-当前 MVP 主要面向 Java 项目。底层图模型是通用的，后续可以继续扩展 TypeScript、Python、Go、Rust 等语言解析器，而不需要推翻现有 schema。
+当前 MVP 支持 Java、JavaScript、TypeScript、Python。底层图模型是通用的，后续可以继续扩展 Go、Rust 等语言解析器，而不需要推翻现有 schema。
 
 ## 当前能力
 
 - 扫描项目目录中的源码文件。
-- 使用 `web-tree-sitter` 和 `tree-sitter-wasms` 解析 Java 文件。
+- 使用 `web-tree-sitter` 和 `tree-sitter-wasms` 解析 Java、JavaScript、TypeScript、Python 文件。
 - 提取 Java 的 package、import、class、interface、enum、field、method、constructor。
+- 提取 JavaScript/TypeScript/Python 的 import、class、function、method、call。
+- 解析 JavaScript/TypeScript 相对路径 import，以及 Python 项目内模块 import，并连到目标文件或符号。
+- 解析常见 import alias 调用，例如 `import { helper as h }` 后的 `h()`、`from mod import Foo as Bar` 后的 `Bar()`。
+- 解析 TypeScript 参数类型、返回类型、`extends`、`implements` 中的类型引用。
+- 解析 Python 参数类型、返回类型、变量/属性注解和类继承中的类型引用。
+- 解析 JavaScript/TypeScript re-export，例如 `export { User } from './types'`、`export * from './types'`。
+- 解析 Python wildcard import，例如 `from pkg.models import *` 后的 `User()`、类型注解引用。
 - 提取方法调用候选，并基于字段、参数、局部变量类型解析常见调用，例如 `service.execute()`。
 - 将文件、符号节点、关系边、未解析引用写入本地 SQLite。
-- 提供 CLI 命令：`index`、`sync`、`stats`、`unresolved`、`search`、`node`、`context`、`callers`、`callees`、`refs`、`references`、`serve`。
+- 提供 CLI 命令：`index`、`sync`、`watch`、`git`、`stats`、`unresolved`、`search`、`node`、`context`、`callers`、`callees`、`refs`、`references`、`serve`。
 - 提供第一版 MCP stdio server，方便模型通过工具调用访问索引能力。
 
 ## 当前状态
 
-这是一个早期 MVP，已经可以为 Java 项目建立本地代码图谱，并进行基础符号查询和调用关系查询，但还不是完整的 code agent。
+这是一个早期 MVP，已经可以为 Java、JavaScript、TypeScript、Python 项目建立本地代码图谱，并进行基础符号查询和调用关系查询，但还不是完整的 code agent。
 
 已实现：
 
 - 通用图类型定义
 - SQLite 图存储
 - Java parser
+- JavaScript/TypeScript parser
+- Python parser
 - 简单 resolver
 - 基于 receiver 类型的 Java 调用解析
 - 项目文件扫描
@@ -101,7 +110,7 @@ code-agent stats
 
 也可以直接通过 Node 执行构建后的 CLI 文件。
 
-在 Java 项目目录中运行：
+在目标项目目录中运行：
 
 ```bash
 cd /path/to/your/java-project
@@ -109,7 +118,7 @@ node /Users/fengyue/PycharmProjects/CodeAgent/dist/bin/code-agent.js index
 node /Users/fengyue/PycharmProjects/CodeAgent/dist/bin/code-agent.js stats
 ```
 
-或者在 CodeAgent 项目目录中传入 Java 项目路径：
+或者在 CodeAgent 项目目录中传入目标项目路径：
 
 ```bash
 cd /Users/fengyue/PycharmProjects/CodeAgent
@@ -119,7 +128,7 @@ node dist/bin/code-agent.js stats /path/to/your/java-project
 
 ## 常用命令
 
-以下命令通常在 Java 项目根目录下执行。
+以下命令通常在目标项目根目录下执行。
 
 ```bash
 code-agent index
@@ -154,6 +163,50 @@ code-agent sync
 ```
 
 同步当前项目中的代码变更。如果项目是 git 仓库，会优先通过 `git status` 找出新增、修改、删除的源码文件，然后只更新这些文件对应的索引。适合在改完代码后让索引追上最新状态。
+
+```bash
+code-agent watch
+```
+
+启动文件监听。源码文件发生变化后，会经过短暂 debounce，然后自动执行增量同步。适合本地开发时长驻运行。
+
+示例：
+
+```bash
+code-agent watch
+code-agent watch --debounce 2000
+code-agent watch --verbose
+code-agent watch --verbose --debounce 500
+code-agent watch /path/to/your/java-project
+```
+
+调试索引同步时可以加 `--verbose`。它会在每次 watch 触发同步后额外打印：
+
+- 本次新增、修改、删除了哪些源码文件。
+- 本次新增、更新、删除了哪些符号节点，例如方法签名、位置、导出状态等变化。
+- 本次新增、删除了哪些图关系边，例如调用关系、引用关系、继承关系。
+
+这适合在开发阶段验证“改了一个方法后，索引到底更新了什么”。
+
+```bash
+code-agent git sync
+```
+
+通过 git 变更检测执行一次同步，效果等同于 `sync`，更适合放在 git hook 或脚本中表达“按 git 状态同步”。
+
+```bash
+code-agent git hook install
+```
+
+安装 git hooks。当前会写入 `post-commit`、`post-merge`、`post-checkout`，在提交、合并、切分支之后后台执行 `code-agent git sync`，让索引尽量保持新鲜。
+
+示例：
+
+```bash
+code-agent git hook install
+code-agent git hook status
+code-agent git hook remove
+```
 
 ```bash
 code-agent search UserService
@@ -240,13 +293,27 @@ code-agent references com.example.Service.execute
 code-agent serve
 ```
 
-启动 MCP stdio server。这个命令通常配置给支持 MCP 的模型客户端使用，由客户端通过 stdio 发送 JSON-RPC 请求。
+启动 MCP stdio server。这个命令通常配置给支持 MCP 的模型客户端使用，由客户端通过 stdio 发送 JSON-RPC 请求。默认情况下，MCP tool 每次执行前会自动执行一次增量同步，让查询尽量使用最新索引。
 
 示例：
 
 ```bash
 code-agent serve
 code-agent serve /path/to/your/java-project
+code-agent serve --watch /path/to/your/java-project
+code-agent serve --no-auto-sync /path/to/your/java-project
+```
+
+`--watch` 会在 MCP server 内启动文件监听，源码变化后自动增量同步。也可以通过环境变量开启：
+
+```bash
+CODE_AGENT_MCP_WATCH=1 code-agent serve /path/to/your/project
+```
+
+如果不希望每次 tool 调用前自动同步，可以使用 `--no-auto-sync`，或者设置：
+
+```bash
+CODE_AGENT_MCP_AUTO_SYNC=0 code-agent serve /path/to/your/project
 ```
 
 ## 命令格式
@@ -264,6 +331,31 @@ code-agent sync [projectPath]
 ```
 
 同步指定项目中的变更文件到现有索引。
+
+```bash
+code-agent watch [projectPath]
+code-agent watch --debounce <ms> [projectPath]
+code-agent watch --verbose [projectPath]
+code-agent watch --verbose --debounce <ms> [projectPath]
+```
+
+监听指定项目中的源码文件变化，并自动增量同步索引。默认 debounce 是 `1500ms`。
+
+`--verbose` 会输出每次同步的 changed files、node changes、edge changes。输出中的 `+` 表示新增，`~` 表示更新，`-` 表示删除，方便调试 watch 增量索引效果。
+
+```bash
+code-agent git sync [projectPath]
+```
+
+通过 git 状态执行一次增量同步。
+
+```bash
+code-agent git hook install [projectPath]
+code-agent git hook status [projectPath]
+code-agent git hook remove [projectPath]
+```
+
+安装、查看或移除 CodeAgent 管理的 git hooks。hook 内容有明确 marker，只会替换或删除 CodeAgent 自己写入的片段，不会覆盖用户已有 hook 内容。
 
 ```bash
 code-agent stats [projectPath]
@@ -319,7 +411,15 @@ code-agent references <symbol> [projectPath]
 code-agent serve [projectPath]
 ```
 
-启动 MCP stdio server。
+启动 MCP stdio server。默认启用 tool 调用前自动同步。
+
+```bash
+code-agent serve --watch [projectPath]
+code-agent serve --no-auto-sync [projectPath]
+code-agent serve --watch --debounce <ms> [projectPath]
+```
+
+启动 MCP stdio server，并可选择开启文件监听、关闭自动同步，或配置监听 debounce。
 
 ## MCP 工具
 
@@ -337,7 +437,7 @@ code-agent serve [projectPath]
 
 ## MCP 客户端配置示例
 
-配置 MCP 前，先确保 Java 项目已经建立索引：
+配置 MCP 前，先确保目标项目已经建立索引：
 
 ```bash
 cd /path/to/your/java-project
@@ -391,7 +491,7 @@ code-agent index
 }
 ```
 
-如果 Codex 启动时工作目录就是目标 Java 项目，也可以省略项目路径：
+如果 Codex 启动时工作目录就是目标项目，也可以省略项目路径：
 
 ```json
 {
@@ -431,7 +531,7 @@ Claude、Cursor 等支持 MCP 的客户端通常也是 stdio server 配置，写
 
 ## 索引文件位置
 
-CodeAgent 会把索引数据库写到目标 Java 项目目录中：
+CodeAgent 会把索引数据库写到目标项目目录中：
 
 ```text
 <java-project>/.code-agent/index.db

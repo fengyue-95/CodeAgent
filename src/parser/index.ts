@@ -6,4 +6,6 @@ export interface LanguageParser {
 }
 
 export { JavaParser } from './java-extractor';
+export { ScriptParser } from './script-extractor';
+export { PythonParser } from './python-extractor';
 export { getParser, initGrammars, ensureGrammar } from './grammars';
