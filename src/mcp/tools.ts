@@ -120,9 +120,9 @@ function getProjectPath(value: unknown): string | undefined {
 
 export async function callMcpTool(name: string, args: ToolArgs = {}, runtime: McpToolRuntime = {}): Promise<unknown> {
   const projectArg = getProjectPath(args.projectPath);
-  await runtime.beforeToolCall?.(projectArg);
-
   const paths = resolveProjectPaths(projectArg);
+
+  await runtime.beforeToolCall?.(projectArg);
   ensureStateDir(paths.stateDir);
   const store = createStore(paths.dbPath);
 

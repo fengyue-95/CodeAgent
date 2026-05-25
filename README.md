@@ -20,6 +20,7 @@ CodeAgent 是一个本地代码智能索引底座，用来支撑后续的 code a
 - 将文件、符号节点、关系边、未解析引用写入本地 SQLite。
 - 提供 CLI 命令：`index`、`sync`、`watch`、`git`、`stats`、`unresolved`、`search`、`node`、`context`、`callers`、`callees`、`refs`、`references`、`serve`。
 - 提供第一版 MCP stdio server，方便模型通过工具调用访问索引能力。
+- 提供本地 workspace 工具层：`workspaceGlob`、`workspaceGrep`、`workspaceReadFile`、`workspaceApplyPatch`、`workspaceGitDiff`、`workspaceShellExec`，供后续 agent runtime 调用。
 
 ## 当前状态
 
@@ -423,7 +424,7 @@ code-agent serve --watch --debounce <ms> [projectPath]
 
 ## MCP 工具
 
-`code-agent serve` 当前暴露以下 MCP tools：
+`code-agent serve` 当前只暴露代码图谱查询类 MCP tools：
 
 - `code_agent_status`：查看索引统计信息。
 - `code_agent_search`：搜索符号。
@@ -434,6 +435,89 @@ code-agent serve --watch --debounce <ms> [projectPath]
 - `code_agent_context`：构建简要图上下文。
 
 每个 tool 都支持可选参数 `projectPath`。如果不传，默认使用 MCP server 启动时所在的项目目录。
+
+### Code graph 工具参数示例
+
+查询类工具会在执行前自动增量同步索引，除非 `serve` 使用了 `--no-auto-sync`。
+
+```json
+{
+  "name": "code_agent_search",
+  "arguments": {
+    "query": "UserService"
+  }
+}
+```
+
+```json
+{
+  "name": "code_agent_context",
+  "arguments": {
+    "query": "createUser"
+  }
+}
+```
+
+## 本地 Workspace 工具
+
+workspace 工具是本地工具层，不通过 MCP 暴露。后续实现 agent runtime 时，可以直接从 `src/tool` 调用这些能力。
+
+这些工具用于让模型安全地读取、搜索、修改和验证当前项目文件。所有文件路径都必须位于项目根目录内；`workspaceApplyPatch` 不允许修改 `.git/` 或 `.code-agent/`。
+
+列出匹配文件：
+
+```ts
+await workspaceGlob(projectRoot, {
+  pattern: 'src/**/*.ts',
+  limit: 50,
+});
+```
+
+搜索文件内容：
+
+```ts
+await workspaceGrep(projectRoot, {
+  pattern: 'GraphQueryService',
+  glob: '*.ts',
+  limit: 20,
+});
+```
+
+按行读取文件：
+
+```ts
+await workspaceReadFile(projectRoot, {
+  filePath: 'src/graph/index.ts',
+  startLine: 1,
+  endLine: 120,
+});
+```
+
+应用 unified diff patch：
+
+```ts
+await workspaceApplyPatch(projectRoot, {
+  patch: 'diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1,2 @@\n # CodeAgent\n+Local code graph indexer.\n',
+});
+```
+
+查看 git diff：
+
+```ts
+await workspaceGitDiff(projectRoot, {
+  filePath: 'README.md',
+});
+```
+
+执行项目内 shell 命令：
+
+```ts
+await workspaceShellExec(projectRoot, {
+  command: 'npm run check',
+  timeoutMs: 30000,
+  maxBuffer: 65536,
+});
+```
 
 ## MCP 客户端配置示例
 

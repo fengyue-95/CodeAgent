@@ -7,3 +7,4 @@ export * from './mcp';
 export * from './project';
 export * from './service/indexer';
 export * from './store/queries';
+export * from './tool';
