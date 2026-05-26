@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { createStore, ensureStateDir, resolveProjectPaths } from '../project';
 import { SqliteGraphStore } from '../store/queries';
 import { CodeIndexService, SyncResult } from '../service/indexer';
@@ -14,8 +16,13 @@ import {
   removeGitSyncHooks,
   watchDisabledReason,
 } from '../sync';
+import { AgentName } from '../agent';
+import { AgentRuntime, AgentRuntimeResult } from '../runtime';
+import { createDeepSeekProvider } from '../provider';
+import { SessionPart } from '../session';
 
 type Command =
+  | 'run'
   | 'index'
   | 'sync'
   | 'watch'
@@ -31,25 +38,106 @@ type Command =
   | 'refs'
   | 'references';
 
+const commands: Command[] = [
+  'run',
+  'index',
+  'sync',
+  'watch',
+  'git',
+  'stats',
+  'unresolved',
+  'search',
+  'node',
+  'context',
+  'serve',
+  'callers',
+  'callees',
+  'refs',
+  'references',
+];
+
 function usage(): string {
   return [
-    'Usage: code-agent <command> [projectPath]',
+    'Usage: code-agent <command> [args]',
     '',
     'Commands:',
-    '  index   Build or rebuild the local code graph index',
-    '  sync    Sync changed files into the local index',
-    '  watch   Watch files and auto-sync changed source files',
-    '  git     Run git-based sync or manage git hooks',
-    '  stats   Show local index statistics',
-    '  unresolved Show unresolved reference summary',
-    '  search  Search symbols by name',
-    '  node    Show details for a symbol or node id',
-    '  context Build a small graph context for a query',
-    '  serve   Start the MCP stdio server',
-    '  callers Find methods that call a symbol',
-    '  callees Find symbols called by a method',
-    '  refs    Find references to a symbol',
+    '  run "<task>" [projectPath]       Run an agent task',
+    '  index [projectPath]              Build or rebuild the local code graph index',
+    '  sync [projectPath]               Sync changed files into the local index',
+    '  watch [options] [projectPath]    Watch files and auto-sync changed source files',
+    '  git sync [projectPath]           Run git-based sync',
+    '  git hook <action> [projectPath]  Manage git hooks; action: install, remove, status',
+    '  stats [projectPath]              Show local index statistics',
+    '  unresolved [options] [projectPath] Show unresolved reference summary',
+    '  search <query> [projectPath]     Search symbols by name',
+    '  node <query> [projectPath]       Show details for a symbol or node id',
+    '  context <query> [projectPath]    Build a small graph context for a query',
+    '  callers <symbol> [projectPath]   Find methods that call a symbol',
+    '  callees <symbol> [projectPath]   Find symbols called by a method',
+    '  refs <symbol> [projectPath]      Find references to a symbol',
+    '  references <symbol> [projectPath] Alias for refs',
+    '  serve [options] [projectPath]    Start the MCP stdio server',
+    '',
+    'Run options:',
+    '  --agent <build|plan>             Agent to use; default: build',
+    '  --model <model>                  Provider model override',
+    '  --max-steps <n>                  Maximum agent loop steps',
+    '  --temperature <n>                Sampling temperature',
+    '  --cwd, --project <projectPath>   Project root override',
+    '',
+    'Watch options:',
+    '  --verbose, -v                    Print changed nodes and edges',
+    '  --debounce <ms>                  Debounce file events; default: 1500',
+    '',
+    'Serve options:',
+    '  --no-auto-sync                   Disable initial/automatic sync',
+    '  --watch                          Watch files while serving MCP',
+    '  --debounce <ms>                  Debounce watch events',
+    '',
+    'Unresolved options:',
+    '  --limit <n>, -n <n>              Number of top unresolved refs to show',
+    '',
+    'Operation examples:',
+    '  code-agent index .',
+    '      Build the code graph for the current project.',
+    '  code-agent sync .',
+    '      Incrementally sync changed files into the existing graph.',
+    '  code-agent run "explain the runtime entrypoint"',
+    '      Run the default build agent against the current project.',
+    '  code-agent run "plan a session resume feature" --agent plan --max-steps 6',
+    '      Use the read-only planning agent with a step limit.',
+    '  code-agent search SessionProcessor',
+    '      Search indexed symbols matching SessionProcessor.',
+    '  code-agent node GraphQueryService',
+    '      Show details for a resolved symbol or node id.',
+    '  code-agent context AgentRuntime',
+    '      Show entry points, callers, callees, references, and related files.',
+    '  code-agent callers createLocalToolRegistry',
+    '      Find code paths that call a symbol.',
+    '  code-agent callees AgentRuntime',
+    '      Find symbols called by a method or constructor.',
+    '  code-agent refs GraphQueryService',
+    '      Find references to a symbol.',
+    '  code-agent unresolved --limit 10',
+    '      Show the top unresolved references.',
+    '  code-agent watch --verbose .',
+    '      Keep the graph synced and print detailed diffs.',
+    '  code-agent serve --watch .',
+    '      Start the MCP server and keep the graph synced.',
+    '  code-agent git hook install .',
+    '      Install git hooks that keep the graph in sync.',
+    '  code-agent git hook status .',
+    '      Check whether git sync hooks are installed.',
   ].join('\n');
+}
+
+interface RunArgs {
+  task: string;
+  projectArg?: string;
+  agent?: AgentName;
+  model?: string;
+  maxSteps?: number;
+  temperature?: number;
 }
 
 async function createIndexService(dbPath: string): Promise<{
@@ -218,6 +306,184 @@ function parseLimit(value: string | undefined, fallback = 20): number {
   return parsed;
 }
 
+function parseOptionalNumber(value: string | undefined, name: string): number {
+  if (!value) {
+    throw new Error(`Missing value for ${name}`);
+  }
+
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid ${name}: ${value}`);
+  }
+
+  return parsed;
+}
+
+function parseRunArgs(args: string[]): RunArgs {
+  let task: string | undefined;
+  let projectArg: string | undefined;
+  let agent: AgentName | undefined;
+  let model: string | undefined;
+  let maxSteps: number | undefined;
+  let temperature: number | undefined;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) {
+      continue;
+    }
+
+    if (arg === '--agent') {
+      agent = parseAgentName(args[index + 1]);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith('--agent=')) {
+      agent = parseAgentName(arg.slice('--agent='.length));
+      continue;
+    }
+
+    if (arg === '--model') {
+      model = args[index + 1];
+      if (!model) {
+        throw new Error('Missing value for --model');
+      }
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith('--model=')) {
+      model = arg.slice('--model='.length);
+      continue;
+    }
+
+    if (arg === '--max-steps') {
+      maxSteps = parseLimit(args[index + 1]);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith('--max-steps=')) {
+      maxSteps = parseLimit(arg.slice('--max-steps='.length));
+      continue;
+    }
+
+    if (arg === '--temperature') {
+      temperature = parseOptionalNumber(args[index + 1], '--temperature');
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith('--temperature=')) {
+      temperature = parseOptionalNumber(arg.slice('--temperature='.length), '--temperature');
+      continue;
+    }
+
+    if (arg === '--cwd' || arg === '--project') {
+      projectArg = args[index + 1];
+      if (!projectArg) {
+        throw new Error(`Missing value for ${arg}`);
+      }
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith('--cwd=')) {
+      projectArg = arg.slice('--cwd='.length);
+      continue;
+    }
+
+    if (arg.startsWith('--project=')) {
+      projectArg = arg.slice('--project='.length);
+      continue;
+    }
+
+    if (arg.startsWith('--')) {
+      throw new Error(`Unknown run option: ${arg}`);
+    }
+
+    if (!task) {
+      task = arg;
+      continue;
+    }
+
+    if (!projectArg) {
+      projectArg = arg;
+      continue;
+    }
+
+    throw new Error(`Unexpected run argument: ${arg}`);
+  }
+
+  if (!task) {
+    throw new Error('Missing task. Usage: code-agent run "<task>" [projectPath]');
+  }
+
+  return { task, projectArg, agent, model, maxSteps, temperature };
+}
+
+function parseAgentName(value: string | undefined): AgentName {
+  if (value === 'build' || value === 'plan') {
+    return value;
+  }
+
+  throw new Error(`Invalid agent: ${value ?? ''}. Expected "build" or "plan".`);
+}
+
+function isCommand(value: string): value is Command {
+  return commands.includes(value as Command);
+}
+
+function loadLocalEnv(projectRoot: string): void {
+  const home = process.env.HOME;
+  if (home) {
+    loadDotEnvFile(path.join(home, '.code-agent', '.env'));
+    loadDotEnvFile(path.join(home, '.config', 'code-agent', '.env'));
+  }
+
+  loadDotEnvFile(path.join(projectRoot, '.env'));
+  loadDotEnvFile(path.join(process.cwd(), '.env'));
+}
+
+function loadDotEnvFile(filePath: string): void {
+  if (!fs.existsSync(filePath)) {
+    return;
+  }
+
+  const content = fs.readFileSync(filePath, 'utf8');
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) {
+      continue;
+    }
+
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(trimmed);
+    if (!match) {
+      continue;
+    }
+
+    const [, key, rawValue] = match;
+    if (process.env[key!] !== undefined) {
+      continue;
+    }
+
+    process.env[key!] = unquoteEnvValue(rawValue ?? '');
+  }
+}
+
+function unquoteEnvValue(value: string): string {
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1);
+  }
+
+  return trimmed;
+}
+
 function parseUnresolvedArgs(args: string[]): { limit: number; projectArg?: string } {
   const [first, second, third] = args;
 
@@ -345,6 +611,38 @@ async function runIndex(projectArg?: string): Promise<void> {
     console.log(`Database: ${paths.dbPath}`);
   } finally {
     store.close();
+  }
+}
+
+async function runAgentTask(args: string[]): Promise<void> {
+  const options = parseRunArgs(args);
+  const paths = resolveProjectPaths(options.projectArg);
+  loadLocalEnv(paths.root);
+
+  const runtime = new AgentRuntime();
+  const provider = createDeepSeekProvider({
+    model: options.model,
+  });
+
+  console.log(`Project: ${paths.root}`);
+  console.log(`Agent: ${options.agent ?? 'build'}`);
+  console.log(`Model: ${options.model ?? provider.defaultModel}`);
+  console.log('');
+
+  const result = await runtime.run({
+    task: options.task,
+    projectPath: paths.root,
+    provider,
+    agent: options.agent,
+    model: options.model,
+    maxSteps: options.maxSteps,
+    temperature: options.temperature,
+    title: options.task,
+  });
+
+  printRunResult(result);
+  if (result.status === 'failed') {
+    process.exitCode = 1;
   }
 }
 
@@ -518,6 +816,56 @@ function runUnresolved(args: string[]): void {
     }
   } finally {
     store.close();
+  }
+}
+
+function printRunResult(result: AgentRuntimeResult): void {
+  console.log(`Session: ${result.session.id}`);
+  console.log(`Status: ${result.status}`);
+  console.log(`Steps: ${result.steps}`);
+  console.log('');
+
+  let printedAssistant = false;
+  for (const item of result.messages) {
+    if (item.message.role !== 'assistant') {
+      continue;
+    }
+
+    for (const part of item.parts) {
+      printRunPart(part);
+      if (part.type === 'text' && part.text.trim()) {
+        printedAssistant = true;
+      }
+    }
+  }
+
+  if (!printedAssistant) {
+    console.log('No assistant text output.');
+  }
+}
+
+function printRunPart(part: SessionPart): void {
+  if (part.type === 'text') {
+    const text = part.text.trim();
+    if (text) {
+      console.log(text);
+      console.log('');
+    }
+    return;
+  }
+
+  if (part.type === 'tool') {
+    const label = part.status === 'completed'
+      ? 'completed'
+      : part.status === 'error'
+        ? `error: ${part.error ?? 'unknown error'}`
+        : part.status;
+    console.log(`[tool:${part.tool}] ${label}`);
+    return;
+  }
+
+  if (part.type === 'error') {
+    console.log(`[error] ${part.message}`);
   }
 }
 
@@ -762,24 +1110,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (
-    ![
-      'index',
-      'sync',
-      'watch',
-      'git',
-      'stats',
-      'unresolved',
-      'search',
-      'node',
-      'context',
-      'serve',
-      'callers',
-      'callees',
-      'refs',
-      'references',
-    ].includes(rawCommand)
-  ) {
+  if (!isCommand(rawCommand)) {
     console.error(`Unknown command: ${rawCommand}`);
     console.error('');
     console.error(usage());
@@ -787,7 +1118,12 @@ async function main(): Promise<void> {
     return;
   }
 
-  const command = rawCommand as Command;
+  const command = rawCommand;
+
+  if (command === 'run') {
+    await runAgentTask(restArgs);
+    return;
+  }
 
   if (command === 'index') {
     await runIndex(firstArg);

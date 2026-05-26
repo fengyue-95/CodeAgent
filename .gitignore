@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .npm-cache/
+.env
+.env.*
 *.db
 *.db-journal
 *.db-shm

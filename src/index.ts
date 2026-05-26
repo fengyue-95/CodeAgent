@@ -1,3 +1,4 @@
+export * from './agent';
 export * from './types';
 export * from './scanner';
 export * from './parser';
@@ -5,6 +6,9 @@ export * from './resolver';
 export * from './graph';
 export * from './mcp';
 export * from './project';
+export * from './provider';
+export * from './runtime';
+export * from './session';
 export * from './service/indexer';
 export * from './store/queries';
 export * from './tool';

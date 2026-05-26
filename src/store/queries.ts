@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { SqliteSessionStore } from '../session/store';
 import {
   CodeEdge,
   CodeNode,
@@ -55,6 +56,7 @@ export interface GraphStore {
   }): void;
 
   getStats(): IndexStats;
+  sessions(): SqliteSessionStore;
 }
 
 function parseJson<T>(value: string | null): T | undefined {
@@ -165,6 +167,10 @@ export class SqliteGraphStore implements GraphStore {
 
   close(): void {
     this.db.close();
+  }
+
+  sessions(): SqliteSessionStore {
+    return new SqliteSessionStore(this.db);
   }
 
   upsertFile(file: FileRecord): void {

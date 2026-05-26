@@ -64,3 +64,80 @@ CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind);
 CREATE INDEX IF NOT EXISTS idx_unref_name ON unresolved_refs(ref_name);
 CREATE INDEX IF NOT EXISTS idx_unref_file ON unresolved_refs(file_path);
 CREATE INDEX IF NOT EXISTS idx_unref_from_node ON unresolved_refs(from_node_id);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  cwd TEXT NOT NULL,
+  agent TEXT NOT NULL,
+  model TEXT,
+  status TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  metadata TEXT
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  agent TEXT,
+  model TEXT,
+  parent_message_id TEXT,
+  created_at INTEGER NOT NULL,
+  completed_at INTEGER,
+  metadata TEXT,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (parent_message_id) REFERENCES messages(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS message_parts (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  type TEXT NOT NULL,
+  data TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS permissions (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  run_id TEXT,
+  tool_call_id TEXT,
+  permission TEXT NOT NULL,
+  pattern TEXT NOT NULL,
+  action TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  metadata TEXT,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  message_id TEXT,
+  agent TEXT NOT NULL,
+  model TEXT,
+  status TEXT NOT NULL,
+  started_at INTEGER NOT NULL,
+  completed_at INTEGER,
+  steps INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  metadata TEXT,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at);
+CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_message_parts_message ON message_parts(message_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_message_parts_session ON message_parts(session_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_permissions_session ON permissions(session_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_permissions_run ON permissions(run_id, created_at, id);
+CREATE INDEX IF NOT EXISTS idx_runs_session ON runs(session_id, started_at, id);
