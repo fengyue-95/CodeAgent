@@ -27,7 +27,17 @@ const basePermissions: AgentPermissionRuleset = [
   permissionRule('workspace.read', 'allow'),
   permissionRule('workspace.git_diff', 'allow'),
   permissionRule('workspace.apply_patch', 'ask'),
+  permissionRule('workspace.edit', 'ask'),
+  permissionRule('workspace.write', 'ask'),
   permissionRule('workspace.shell', 'ask'),
+  permissionRule('todo.write', 'allow'),
+  permissionRule('task.run', 'ask'),
+  permissionRule('web.fetch', 'ask'),
+  permissionRule('web.search', 'ask'),
+  permissionRule('browser.navigate', 'ask'),
+  permissionRule('browser.content', 'allow'),
+  permissionRule('browser.screenshot', 'ask'),
+  permissionRule('browser.close', 'allow'),
 ];
 
 export const buildAgent: AgentInfo = {
@@ -40,6 +50,8 @@ export const buildAgent: AgentInfo = {
     basePermissions,
     [
       permissionRule('workspace.apply_patch', 'allow'),
+      permissionRule('workspace.edit', 'ask'),
+      permissionRule('workspace.write', 'ask'),
       permissionRule('workspace.shell', 'ask'),
       permissionRule('workspace.shell', 'deny', 'rm *'),
       permissionRule('workspace.shell', 'deny', 'rm -rf *'),
@@ -63,7 +75,14 @@ export const planAgent: AgentInfo = {
       permissionRule('workspace.read', 'allow'),
       permissionRule('workspace.git_diff', 'allow'),
       permissionRule('workspace.apply_patch', 'deny'),
+      permissionRule('workspace.edit', 'deny'),
+      permissionRule('workspace.write', 'deny'),
       permissionRule('workspace.shell', 'deny'),
+      permissionRule('task.run', 'deny'),
+      permissionRule('browser.navigate', 'ask'),
+      permissionRule('browser.content', 'allow'),
+      permissionRule('browser.screenshot', 'ask'),
+      permissionRule('browser.close', 'allow'),
     ]
   ),
 };

@@ -1,6 +1,30 @@
 import { GraphQueryService } from '../graph';
 import { GraphStore } from '../store/queries';
 import {
+  FileEditArgs,
+  FileWriteArgs,
+  editFile,
+  writeFile,
+} from './file-edit';
+import {
+  TodoItem,
+  TodoWriteArgs,
+  parseTodos,
+} from './todo';
+import {
+  BrowserContentArgs,
+  BrowserNavigateArgs,
+  BrowserScreenshotArgs,
+  WebFetchArgs,
+  WebSearchArgs,
+  browserContent,
+  closeBrowserSession,
+  browserNavigate,
+  browserScreenshot,
+  webFetch,
+  webSearch,
+} from './web';
+import {
   WorkspaceToolArgs,
   workspaceApplyPatch,
   workspaceGitDiff,
@@ -28,11 +52,26 @@ export interface ToolRegistry {
 export interface LocalToolRegistryInput {
   projectRoot: string;
   store: GraphStore;
+  runTask?: LocalSubTaskRunner;
 }
 
+export interface LocalSubTaskInput {
+  description: string;
+  prompt: string;
+  agent?: string;
+  maxSteps?: number;
+}
+
+export type LocalSubTaskRunner = (input: LocalSubTaskInput) => Promise<unknown>;
+
 export function createLocalToolRegistry(input: LocalToolRegistryInput): ToolRegistry {
+  const todos: TodoItem[] = [];
   const tools = [
     ...createWorkspaceTools(input.projectRoot),
+    ...createFileEditTools(input.projectRoot),
+    ...createTodoTools(todos),
+    ...createTaskTools(input.runTask),
+    ...createWebTools(input.projectRoot),
     ...createCodeGraphTools(input.store),
   ];
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
@@ -47,7 +86,7 @@ export function createLocalToolRegistry(input: LocalToolRegistryInput): ToolRegi
 export function createWorkspaceTools(projectRoot: string): LocalToolDefinition[] {
   return [
     {
-      name: 'workspaceGlob',
+      name: 'glob',
       permission: 'workspace.glob',
       description: 'List workspace files matching a glob pattern.',
       parameters: objectSchema({
@@ -59,7 +98,7 @@ export function createWorkspaceTools(projectRoot: string): LocalToolDefinition[]
       execute: (args) => workspaceGlob(projectRoot, args as WorkspaceToolArgs),
     },
     {
-      name: 'workspaceGrep',
+      name: 'grep',
       permission: 'workspace.grep',
       description: 'Search workspace file contents with ripgrep.',
       parameters: objectSchema({
@@ -76,7 +115,7 @@ export function createWorkspaceTools(projectRoot: string): LocalToolDefinition[]
       execute: (args) => workspaceGrep(projectRoot, args as WorkspaceToolArgs),
     },
     {
-      name: 'workspaceReadFile',
+      name: 'read',
       permission: 'workspace.read',
       description: 'Read a workspace file, optionally constrained to a line range.',
       parameters: objectSchema({
@@ -89,7 +128,7 @@ export function createWorkspaceTools(projectRoot: string): LocalToolDefinition[]
       execute: (args) => workspaceReadFile(projectRoot, args as WorkspaceToolArgs),
     },
     {
-      name: 'workspaceApplyPatch',
+      name: 'applyPatch',
       permission: 'workspace.apply_patch',
       description: 'Apply a git-compatible patch inside the workspace.',
       parameters: objectSchema({
@@ -99,7 +138,7 @@ export function createWorkspaceTools(projectRoot: string): LocalToolDefinition[]
       execute: (args) => workspaceApplyPatch(projectRoot, args as WorkspaceToolArgs),
     },
     {
-      name: 'workspaceGitDiff',
+      name: 'gitDiff',
       permission: 'workspace.git_diff',
       description: 'Show the current workspace git diff, optionally for one file.',
       parameters: objectSchema({
@@ -111,7 +150,7 @@ export function createWorkspaceTools(projectRoot: string): LocalToolDefinition[]
       execute: (args) => workspaceGitDiff(projectRoot, args as WorkspaceToolArgs),
     },
     {
-      name: 'workspaceShellExec',
+      name: 'shell',
       permission: 'workspace.shell',
       description: 'Run a shell command inside the workspace.',
       parameters: objectSchema({
@@ -122,6 +161,192 @@ export function createWorkspaceTools(projectRoot: string): LocalToolDefinition[]
       }, ['command']),
       pattern: (args) => String(args.command ?? '*'),
       execute: (args) => workspaceShellExec(projectRoot, args as WorkspaceToolArgs),
+    },
+  ];
+}
+
+export function createFileEditTools(projectRoot: string): LocalToolDefinition[] {
+  return [
+    {
+      name: 'edit',
+      permission: 'workspace.edit',
+      description: 'Replace text in an existing workspace file. Use a specific oldString; set replaceAll only when every occurrence should change.',
+      parameters: objectSchema({
+        filePath: stringProperty('Path to a file inside the project root.'),
+        oldString: stringProperty('Exact text to replace.'),
+        newString: stringProperty('Replacement text.'),
+        replaceAll: booleanProperty('Replace every occurrence of oldString. Defaults to false.'),
+      }, ['filePath', 'oldString', 'newString']),
+      pattern: (args) => String(args.filePath ?? '*'),
+      execute: (args) => editFile(projectRoot, args as FileEditArgs),
+    },
+    {
+      name: 'write',
+      permission: 'workspace.write',
+      description: 'Write full content to a workspace file, creating parent directories when needed.',
+      parameters: objectSchema({
+        filePath: stringProperty('Path to a file inside the project root.'),
+        content: stringProperty('Full file content to write.'),
+      }, ['filePath', 'content']),
+      pattern: (args) => String(args.filePath ?? '*'),
+      execute: (args) => writeFile(projectRoot, args as FileWriteArgs),
+    },
+  ];
+}
+
+export function createTodoTools(todos: TodoItem[]): LocalToolDefinition[] {
+  return [
+    {
+      name: 'todowrite',
+      permission: 'todo.write',
+      description: 'Replace the current todo list for this agent run. Use it to track multi-step work.',
+      parameters: objectSchema({
+        todos: {
+          type: 'array',
+          description: 'The updated todo list.',
+          items: objectSchema({
+            content: stringProperty('Brief task description.'),
+            status: {
+              type: 'string',
+              enum: ['pending', 'in_progress', 'completed', 'cancelled'],
+              description: 'Current status.',
+            },
+            priority: {
+              type: 'string',
+              enum: ['high', 'medium', 'low'],
+              description: 'Priority.',
+            },
+          }, ['content', 'status', 'priority']),
+        },
+      }, ['todos']),
+      pattern: () => '*',
+      execute: async (args) => {
+        const next = parseTodos(args as TodoWriteArgs);
+        todos.splice(0, todos.length, ...next);
+        return {
+          todos: [...todos],
+          active: todos.filter((todo) => todo.status !== 'completed' && todo.status !== 'cancelled').length,
+        };
+      },
+    },
+  ];
+}
+
+export function createTaskTools(runTask?: LocalSubTaskRunner): LocalToolDefinition[] {
+  return [
+    {
+      name: 'task',
+      permission: 'task.run',
+      description: 'Run a focused subagent task and return its result. Use for independent investigation or planning.',
+      parameters: objectSchema({
+        description: stringProperty('Short 3-5 word description of the subtask.'),
+        prompt: stringProperty('Detailed task for the subagent.'),
+        agent: stringProperty('Optional agent to use, such as plan or build. Defaults to plan.'),
+        maxSteps: numberProperty('Optional maximum subagent steps.'),
+      }, ['description', 'prompt']),
+      pattern: (args) => String(args.agent ?? 'plan'),
+      execute: async (args) => {
+        if (!runTask) {
+          throw new Error('Subagent task runner is not configured');
+        }
+        return runTask({
+          description: requireString(args.description, 'description'),
+          prompt: requireString(args.prompt, 'prompt'),
+          agent: typeof args.agent === 'string' ? args.agent : undefined,
+          maxSteps: getLimit(args.maxSteps),
+        });
+      },
+    },
+  ];
+}
+
+export function createWebTools(projectRoot: string): LocalToolDefinition[] {
+  return [
+    {
+      name: 'webfetch',
+      permission: 'web.fetch',
+      description: 'Fetch content from an HTTP or HTTPS URL and return text or HTML.',
+      parameters: objectSchema({
+        url: stringProperty('URL to fetch. Must start with http:// or https://.'),
+        format: {
+          type: 'string',
+          enum: ['text', 'html'],
+          description: 'Return plain text or raw HTML. Defaults to text.',
+        },
+        timeoutMs: numberProperty('Request timeout in milliseconds.'),
+        maxBytes: numberProperty('Maximum response bytes to read.'),
+      }, ['url']),
+      pattern: (args) => String(args.url ?? '*'),
+      execute: (args) => webFetch(args as WebFetchArgs),
+    },
+    {
+      name: 'websearch',
+      permission: 'web.search',
+      description: 'Search the web with a local Chrome browser driven by Playwright and return result links and snippets.',
+      parameters: objectSchema({
+        query: stringProperty('Web search query.'),
+        limit: numberProperty('Maximum number of results. Defaults to 8.'),
+        engine: {
+          type: 'string',
+          enum: ['google', 'duckduckgo', 'bing'],
+          description: 'Search engine to use. Defaults to duckduckgo.',
+        },
+        headless: booleanProperty('Run Chrome headlessly. Defaults to true.'),
+        timeoutMs: numberProperty('Browser navigation timeout in milliseconds.'),
+      }, ['query']),
+      pattern: (args) => String(args.query ?? '*'),
+      execute: (args) => webSearch(args as WebSearchArgs),
+    },
+    {
+      name: 'browserNavigate',
+      permission: 'browser.navigate',
+      description: 'Navigate the local Chrome browser to a URL using Playwright.',
+      parameters: objectSchema({
+        url: stringProperty('URL to navigate to. Must start with http:// or https://.'),
+        waitUntil: {
+          type: 'string',
+          enum: ['load', 'domcontentloaded', 'networkidle', 'commit'],
+          description: 'Navigation wait condition. Defaults to domcontentloaded.',
+        },
+        headless: booleanProperty('Run Chrome headlessly. Defaults to true.'),
+        timeoutMs: numberProperty('Navigation timeout in milliseconds.'),
+      }, ['url']),
+      pattern: (args) => String(args.url ?? '*'),
+      execute: (args) => browserNavigate(args as BrowserNavigateArgs),
+    },
+    {
+      name: 'browserContent',
+      permission: 'browser.content',
+      description: 'Get text or HTML from the current local Chrome browser page.',
+      parameters: objectSchema({
+        format: {
+          type: 'string',
+          enum: ['text', 'html'],
+          description: 'Return plain text or raw HTML. Defaults to text.',
+        },
+        maxBytes: numberProperty('Maximum bytes to return.'),
+      }),
+      pattern: () => '*',
+      execute: (args) => browserContent(args as BrowserContentArgs),
+    },
+    {
+      name: 'browserScreenshot',
+      permission: 'browser.screenshot',
+      description: 'Take a screenshot of the current local Chrome browser page and save it under the project.',
+      parameters: objectSchema({
+        filePath: stringProperty('Optional output path inside the project. Defaults to .code-agent/screenshots/*.png.'),
+        fullPage: booleanProperty('Capture the full scrollable page. Defaults to false.'),
+      }),
+      pattern: (args) => String(args.filePath ?? '*'),
+      execute: (args) => browserScreenshot(projectRoot, args as BrowserScreenshotArgs),
+    },
+    {
+      name: 'browserClose',
+      permission: 'browser.close',
+      description: 'Close the local Chrome browser session used by browser tools.',
+      parameters: objectSchema({}),
+      pattern: () => '*',
+      execute: async () => closeBrowserSession(),
     },
   ];
 }

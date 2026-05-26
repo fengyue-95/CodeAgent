@@ -2,6 +2,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { createInterface } from 'node:readline/promises';
 import { createStore, ensureStateDir, resolveProjectPaths } from '../project';
 import { SqliteGraphStore } from '../store/queries';
 import { CodeIndexService, SyncResult } from '../service/indexer';
@@ -17,9 +18,9 @@ import {
   watchDisabledReason,
 } from '../sync';
 import { AgentName } from '../agent';
-import { AgentRuntime, AgentRuntimeResult } from '../runtime';
+import { AgentPermissionRequest, AgentRuntime, AgentRuntimeEvent, AgentRuntimeResult } from '../runtime';
 import { createDeepSeekProvider } from '../provider';
-import { SessionPart } from '../session';
+import { closeBrowserSession } from '../tool';
 
 type Command =
   | 'run'
@@ -629,20 +630,26 @@ async function runAgentTask(args: string[]): Promise<void> {
   console.log(`Model: ${options.model ?? provider.defaultModel}`);
   console.log('');
 
-  const result = await runtime.run({
-    task: options.task,
-    projectPath: paths.root,
-    provider,
-    agent: options.agent,
-    model: options.model,
-    maxSteps: options.maxSteps,
-    temperature: options.temperature,
-    title: options.task,
-  });
+  try {
+    const result = await runtime.run({
+      task: options.task,
+      projectPath: paths.root,
+      provider,
+      agent: options.agent,
+      model: options.model,
+      maxSteps: options.maxSteps,
+      temperature: options.temperature,
+      title: options.task,
+      onEvent: printRunEvent,
+      onPermissionRequest: askPermission,
+    });
 
-  printRunResult(result);
-  if (result.status === 'failed') {
-    process.exitCode = 1;
+    printRunResult(result);
+    if (result.status === 'failed') {
+      process.exitCode = 1;
+    }
+  } finally {
+    await closeBrowserSession();
   }
 }
 
@@ -820,53 +827,127 @@ function runUnresolved(args: string[]): void {
 }
 
 function printRunResult(result: AgentRuntimeResult): void {
+  closeRunTextLine();
+  console.log('');
   console.log(`Session: ${result.session.id}`);
   console.log(`Status: ${result.status}`);
   console.log(`Steps: ${result.steps}`);
-  console.log('');
+}
 
-  let printedAssistant = false;
-  for (const item of result.messages) {
-    if (item.message.role !== 'assistant') {
-      continue;
-    }
+let runTextLineOpen = false;
 
-    for (const part of item.parts) {
-      printRunPart(part);
-      if (part.type === 'text' && part.text.trim()) {
-        printedAssistant = true;
-      }
-    }
+function printRunEvent(event: AgentRuntimeEvent): void {
+  if (event.type === 'step-start') {
+    closeRunTextLine();
+    console.log(`\n[step ${event.step}/${event.maxSteps}] start`);
+    return;
   }
 
-  if (!printedAssistant) {
-    console.log('No assistant text output.');
+  if (event.type === 'assistant-text-delta') {
+    process.stdout.write(event.text);
+    runTextLineOpen = true;
+    return;
+  }
+
+  if (event.type === 'assistant-text') {
+    closeRunTextLine();
+    console.log(event.text.trim());
+    console.log('');
+    return;
+  }
+
+  if (event.type === 'tool-call-start') {
+    closeRunTextLine();
+    console.log(`[tool:${event.tool}] input`);
+    return;
+  }
+
+  if (event.type === 'tool-call') {
+    closeRunTextLine();
+    console.log(`[tool:${event.tool}] start ${formatToolInput(event.input)}`);
+    return;
+  }
+
+  if (event.type === 'permission-request') {
+    closeRunTextLine();
+    console.log(`[permission] ${event.request.permission} ${event.request.pattern}`);
+    return;
+  }
+
+  if (event.type === 'permission-result') {
+    closeRunTextLine();
+    console.log(`[permission] ${event.approved ? 'approved' : 'rejected'}`);
+    return;
+  }
+
+  if (event.type === 'tool-result') {
+    closeRunTextLine();
+    console.log(`[tool:${event.tool}] done ${formatToolOutput(event.output)}`);
+    return;
+  }
+
+  if (event.type === 'tool-error') {
+    closeRunTextLine();
+    console.log(`[tool:${event.tool}] error ${event.error}`);
+    return;
+  }
+
+  if (event.type === 'step-finish') {
+    closeRunTextLine();
+    console.log(`[step ${event.step}] finish${event.reason ? ` (${event.reason})` : ''}`);
+    return;
+  }
+
+  if (event.type === 'runtime-error') {
+    closeRunTextLine();
+    console.log(`[error] ${event.error}`);
   }
 }
 
-function printRunPart(part: SessionPart): void {
-  if (part.type === 'text') {
-    const text = part.text.trim();
-    if (text) {
-      console.log(text);
-      console.log('');
-    }
-    return;
+function closeRunTextLine(): void {
+  if (runTextLineOpen) {
+    process.stdout.write('\n');
+    runTextLineOpen = false;
+  }
+}
+
+async function askPermission(request: AgentPermissionRequest): Promise<boolean> {
+  closeRunTextLine();
+  console.log('');
+  console.log('Permission required:');
+  console.log(`  Tool: ${request.tool}`);
+  console.log(`  Permission: ${request.permission}`);
+  console.log(`  Pattern: ${request.pattern}`);
+  console.log(`  Input: ${formatToolInput(request.input)}`);
+
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    const answer = (await rl.question('Approve? [y/N] ')).trim().toLowerCase();
+    return answer === 'y' || answer === 'yes';
+  } finally {
+    rl.close();
+  }
+}
+
+function formatToolInput(input: Record<string, unknown>): string {
+  const json = JSON.stringify(input);
+  return json ? truncateText(json, 300) : '{}';
+}
+
+function formatToolOutput(output: string): string {
+  const trimmed = output.trim();
+  if (!trimmed) {
+    return '';
   }
 
-  if (part.type === 'tool') {
-    const label = part.status === 'completed'
-      ? 'completed'
-      : part.status === 'error'
-        ? `error: ${part.error ?? 'unknown error'}`
-        : part.status;
-    console.log(`[tool:${part.tool}] ${label}`);
-    return;
-  }
+  return truncateText(trimmed.replace(/\s+/g, ' '), 500);
+}
 
-  if (part.type === 'error') {
-    console.log(`[error] ${part.message}`);
-  }
+function truncateText(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
 }
 
 function parseWatchArgs(args: string[]): { debounceMs: number; projectArg?: string; verbose: boolean } {
