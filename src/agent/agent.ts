@@ -17,7 +17,7 @@ export interface AgentInfo {
   permission: AgentPermissionRuleset;
 }
 
-const DEFAULT_MAX_STEPS = 25;
+const DEFAULT_MAX_STEPS = 50;
 
 const basePermissions: AgentPermissionRuleset = [
   permissionRule('*', 'ask'),

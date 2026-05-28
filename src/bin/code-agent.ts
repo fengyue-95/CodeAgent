@@ -20,11 +20,13 @@ import {
 import { AgentName } from '../agent';
 import { AgentPermissionRequest, AgentRuntime, AgentRuntimeEvent, AgentRuntimeResult } from '../runtime';
 import { createDeepSeekProvider } from '../provider';
-import { closeBrowserSession } from '../tool';
+import { LocalToolMode, closeBrowserSession } from '../tool';
 import { SessionInfo } from '../session';
+import { startTui } from '../tui';
 
 type Command =
   | 'run'
+  | 'tui'
   | 'index'
   | 'sync'
   | 'watch'
@@ -44,6 +46,7 @@ type Command =
 
 const commands: Command[] = [
   'run',
+  'tui',
   'index',
   'sync',
   'watch',
@@ -68,6 +71,7 @@ function usage(): string {
     '',
     'Commands:',
     '  run "<task>" [projectPath]       Run an agent task',
+    '  tui [options] [projectPath]      Start interactive terminal UI',
     '  index [projectPath]              Build or rebuild the local code graph index',
     '  sync [projectPath]               Sync changed files into the local index',
     '  watch [options] [projectPath]    Watch files and auto-sync changed source files',
@@ -89,10 +93,19 @@ function usage(): string {
     'Run options:',
     '  --agent <build|plan>             Agent to use; default: build',
     '  --model <model>                  Provider model override',
-    '  --max-steps <n>                  Maximum agent loop steps; default: 25',
+    '  --max-steps <n>                  Maximum agent loop steps; default: 50',
     '  --temperature <n>                Sampling temperature',
+    '  --tools <core|full>              Tool set for run; default: core',
     '  --session <sessionId>            Continue an existing session',
     '  --continue                       Continue the latest session in the project',
+    '  --cwd, --project <projectPath>   Project root override',
+    '',
+    'TUI options:',
+    '  --agent <build|plan>             Initial agent; default: build',
+    '  --tools <core|full>              Initial tool set; default: core',
+    '  --model <model>                  Provider model override',
+    '  --max-steps <n>                  Maximum agent loop steps',
+    '  --continue                       Continue the latest session',
     '  --cwd, --project <projectPath>   Project root override',
     '',
     'Session options:',
@@ -120,8 +133,14 @@ function usage(): string {
     '      Run the default build agent against the current project.',
     '  code-agent run "plan a session resume feature" --agent plan --max-steps 6',
     '      Use the read-only planning agent with a step limit.',
-    '  code-agent run "inspect gift card design" --max-steps 25',
+    '  code-agent run "inspect gift card design" --max-steps 50',
     '      Override the maximum agent loop steps for this run.',
+    '  code-agent run "fix the failing test" --tools full',
+    '      Enable editing, shell, web, todo, and subagent tools for this run.',
+    '  code-agent tui',
+    '      Open an interactive terminal conversation.',
+    '  code-agent tui --continue --agent plan',
+    '      Continue the latest session in plan mode.',
     '  code-agent session new --title "gift card investigation"',
     '      Create a session before running a series of related prompts.',
     '  code-agent run "continue the investigation" --continue',
@@ -160,6 +179,7 @@ interface RunArgs {
   model?: string;
   maxSteps?: number;
   temperature?: number;
+  toolMode?: LocalToolMode;
   sessionId?: string;
   continueLatest?: boolean;
 }
@@ -350,6 +370,7 @@ function parseRunArgs(args: string[]): RunArgs {
   let model: string | undefined;
   let maxSteps: number | undefined;
   let temperature: number | undefined;
+  let toolMode: LocalToolMode | undefined;
   let sessionId: string | undefined;
   let continueLatest = false;
 
@@ -403,6 +424,17 @@ function parseRunArgs(args: string[]): RunArgs {
 
     if (arg.startsWith('--temperature=')) {
       temperature = parseOptionalNumber(arg.slice('--temperature='.length), '--temperature');
+      continue;
+    }
+
+    if (arg === '--tools') {
+      toolMode = parseToolMode(args[index + 1]);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith('--tools=')) {
+      toolMode = parseToolMode(arg.slice('--tools='.length));
       continue;
     }
 
@@ -470,7 +502,7 @@ function parseRunArgs(args: string[]): RunArgs {
     throw new Error('Use either --session or --continue, not both.');
   }
 
-  return { task, projectArg, agent, model, maxSteps, temperature, sessionId, continueLatest };
+  return { task, projectArg, agent, model, maxSteps, temperature, toolMode, sessionId, continueLatest };
 }
 
 function parseAgentName(value: string | undefined): AgentName {
@@ -479,6 +511,14 @@ function parseAgentName(value: string | undefined): AgentName {
   }
 
   throw new Error(`Invalid agent: ${value ?? ''}. Expected "build" or "plan".`);
+}
+
+function parseToolMode(value: string | undefined): LocalToolMode {
+  if (value === 'core' || value === 'full') {
+    return value;
+  }
+
+  throw new Error(`Invalid tool mode: ${value ?? ''}. Expected "core" or "full".`);
 }
 
 function parseProjectFlag(arg: string, next: string | undefined): { consumed: boolean; value?: string } | undefined {
@@ -696,6 +736,7 @@ async function runAgentTask(args: string[]): Promise<void> {
   console.log(`Project: ${paths.root}`);
   console.log(`Agent: ${options.agent ?? 'build'}`);
   console.log(`Model: ${options.model ?? provider.defaultModel}`);
+  console.log(`Tools: ${options.toolMode ?? 'core'}`);
   const sessionId = options.sessionId ?? (options.continueLatest ? resolveLatestSessionId(paths.dbPath) : undefined);
   if (sessionId) {
     console.log(`Session: ${sessionId}`);
@@ -712,6 +753,7 @@ async function runAgentTask(args: string[]): Promise<void> {
       model: options.model,
       maxSteps: options.maxSteps,
       temperature: options.temperature,
+      toolMode: options.toolMode,
       title: options.task,
       onEvent: printRunEvent,
       onPermissionRequest: askPermission,
@@ -1406,7 +1448,17 @@ async function main(): Promise<void> {
   const projectArg = process.argv[4];
   const restArgs = process.argv.slice(3);
 
-  if (!rawCommand || rawCommand === '--help' || rawCommand === '-h') {
+  if (!rawCommand) {
+    await startTui([]);
+    return;
+  }
+
+  if (rawCommand.startsWith('--') && rawCommand !== '--help') {
+    await startTui(process.argv.slice(2));
+    return;
+  }
+
+  if (rawCommand === '--help' || rawCommand === '-h') {
     console.log(usage());
     return;
   }
@@ -1427,6 +1479,15 @@ async function main(): Promise<void> {
       return;
     }
     await runAgentTask(restArgs);
+    return;
+  }
+
+  if (command === 'tui') {
+    if (restArgs.includes('--help') || restArgs.includes('-h')) {
+      console.log(usage());
+      return;
+    }
+    await startTui(restArgs);
     return;
   }
 

@@ -12,6 +12,7 @@ import {
 import { SessionProcessor } from './session-processor';
 import {
   LocalToolDefinition,
+  LocalToolMode,
   LocalSubTaskInput,
   createLocalToolRegistry,
 } from '../tool';
@@ -26,6 +27,7 @@ export interface AgentRuntimeInput {
   title?: string;
   maxSteps?: number;
   temperature?: number;
+  toolMode?: LocalToolMode;
   onEvent?: (event: AgentRuntimeEvent) => void | Promise<void>;
   onPermissionRequest?: (request: AgentPermissionRequest) => boolean | Promise<boolean>;
   subTaskDepth?: number;
@@ -175,6 +177,7 @@ export class AgentRuntime {
     const registry = createLocalToolRegistry({
       projectRoot: context.projectPath,
       store: context.store,
+      mode: context.input.toolMode,
       runTask: (taskInput) => this.runSubTask(context, taskInput),
     });
     const tools = registry.all();

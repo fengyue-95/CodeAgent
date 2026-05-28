@@ -233,6 +233,44 @@ export class SqliteSessionStore {
     }));
   }
 
+  deleteMessagesFrom(sessionId: string, createdAt: number, messageId: string): number {
+    const rows = this.db.prepare(`
+      SELECT id FROM messages
+      WHERE session_id = ?
+        AND (created_at > ? OR (created_at = ? AND id >= ?))
+      ORDER BY created_at, id
+    `).all(sessionId, createdAt, createdAt, messageId) as Array<{ id: string }>;
+
+    if (rows.length === 0) {
+      return 0;
+    }
+
+    const messageIds = rows.map((row) => row.id);
+    const placeholders = messageIds.map(() => '?').join(', ');
+    const runIds = this.db.prepare(`
+      SELECT id FROM runs
+      WHERE session_id = ? AND message_id IN (${placeholders})
+    `).all(sessionId, ...messageIds) as Array<{ id: string }>;
+
+    const deleteTransaction = this.db.transaction(() => {
+      if (runIds.length > 0) {
+        const runPlaceholders = runIds.map(() => '?').join(', ');
+        this.db.prepare(`DELETE FROM permissions WHERE session_id = ? AND run_id IN (${runPlaceholders})`)
+          .run(sessionId, ...runIds.map((run) => run.id));
+      }
+
+      this.db.prepare(`DELETE FROM runs WHERE session_id = ? AND message_id IN (${placeholders})`)
+        .run(sessionId, ...messageIds);
+      this.db.prepare(`DELETE FROM message_parts WHERE session_id = ? AND message_id IN (${placeholders})`)
+        .run(sessionId, ...messageIds);
+      this.db.prepare(`DELETE FROM messages WHERE session_id = ? AND id IN (${placeholders})`)
+        .run(sessionId, ...messageIds);
+    });
+    deleteTransaction();
+    this.touchSession(sessionId);
+    return messageIds.length;
+  }
+
   createPart(input: CreatePartInput): SessionPart {
     const now = Date.now();
     const part = {

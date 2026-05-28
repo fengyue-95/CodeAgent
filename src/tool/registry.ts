@@ -49,9 +49,12 @@ export interface ToolRegistry {
   get(name: string): LocalToolDefinition | undefined;
 }
 
+export type LocalToolMode = 'core' | 'full';
+
 export interface LocalToolRegistryInput {
   projectRoot: string;
   store: GraphStore;
+  mode?: LocalToolMode;
   runTask?: LocalSubTaskRunner;
 }
 
@@ -66,14 +69,20 @@ export type LocalSubTaskRunner = (input: LocalSubTaskInput) => Promise<unknown>;
 
 export function createLocalToolRegistry(input: LocalToolRegistryInput): ToolRegistry {
   const todos: TodoItem[] = [];
-  const tools = [
-    ...createWorkspaceTools(input.projectRoot),
-    ...createFileEditTools(input.projectRoot),
-    ...createTodoTools(todos),
-    ...createTaskTools(input.runTask),
-    ...createWebTools(input.projectRoot),
-    ...createCodeGraphTools(input.store),
-  ];
+  const mode = input.mode ?? 'core';
+  const tools = mode === 'full'
+    ? [
+      ...createWorkspaceTools(input.projectRoot),
+      ...createFileEditTools(input.projectRoot),
+      ...createTodoTools(todos),
+      ...createTaskTools(input.runTask),
+      ...createWebTools(input.projectRoot),
+      ...createCodeGraphTools(input.store),
+    ]
+    : [
+      ...createCoreWorkspaceTools(input.projectRoot),
+      ...createCodeGraphTools(input.store),
+    ];
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
 
   return {
@@ -81,6 +90,15 @@ export function createLocalToolRegistry(input: LocalToolRegistryInput): ToolRegi
     all: () => [...tools],
     get: (name) => byName.get(name),
   };
+}
+
+export function createCoreWorkspaceTools(projectRoot: string): LocalToolDefinition[] {
+  return createWorkspaceTools(projectRoot).filter((tool) =>
+    tool.name === 'glob' ||
+    tool.name === 'grep' ||
+    tool.name === 'read' ||
+    tool.name === 'gitDiff'
+  );
 }
 
 export function createWorkspaceTools(projectRoot: string): LocalToolDefinition[] {
