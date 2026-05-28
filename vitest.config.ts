@@ -1,5 +1,4 @@
 import { defineConfig } from 'vitest/config';
-import path from 'path';
 
 export default defineConfig({
   test: {
@@ -62,19 +61,12 @@ export default defineConfig({
         singleThread: false,
       },
     },
-
-    // 监听模式排除
-    watchExclude: [
-      'node_modules',
-      'dist',
-      '.code-agent',
-    ],
   },
 
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
-      '@tests': path.resolve(__dirname, './tests'),
+      '@': './src',
+      '@tests': './tests',
     },
   },
 });

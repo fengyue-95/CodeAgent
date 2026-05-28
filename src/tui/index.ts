@@ -1,8 +1,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
-import readline from 'node:readline';
+import { spawn } from 'node:child_process';
 import { createInterface, Interface } from 'node:readline/promises';
 import { AgentName } from '../agent';
 import { createDeepSeekProvider } from '../provider';
@@ -10,16 +9,6 @@ import { createStore, ensureStateDir, resolveProjectPaths } from '../project';
 import { AgentPermissionRequest, AgentRuntime, AgentRuntimeEvent } from '../runtime';
 import { SessionInfo, SessionMessageWithParts } from '../session';
 import { LocalToolMode, closeBrowserSession } from '../tool';
-import {
-  completeFileReferenceLine,
-  formatFileSuggestionRows,
-  moveFileReferenceSelection,
-  parseProjectFilesOutput,
-  prepareSelectedFileReferenceInput,
-  projectFilesCommand,
-  scoreFiles,
-  suggestFileReferences,
-} from '../utils/file-references';
 import { parseTaskToolOutput } from '../utils/tool-output';
 
 interface TuiOptions {
@@ -41,15 +30,6 @@ interface TuiState {
   toolMode: LocalToolMode;
   showDetails: boolean;
   undone?: UndonePrompt;
-  fileReferenceFiles?: string[];
-  liveFileSuggestionSignature?: string;
-  liveFileSuggestionVisible?: boolean;
-  liveFileSuggestions?: string[];
-  liveFileSuggestionQuery?: string;
-  liveFileSuggestionSelectedIndex?: number;
-  liveFileSuggestionRowCount?: number;
-  pendingInputLine?: string;
-  skipNextSubmittedLine?: boolean;
 }
 
 interface UndonePrompt {
@@ -66,7 +46,8 @@ const HELP_TEXT = [
   '  /exit, /quit, /q         Exit TUI',
   '  /new [title]             Start a new session',
   '  /sessions                List sessions and switch',
-  '  /agent [build|plan]      Show or change agent',
+  '  /agent [name]            Show or change agent',
+  '    Available: build, plan, general, explore, scout, review, refactor, test, doc, debug',
   '  /tab                     Cycle agent, same as pressing Tab on an empty prompt',
   '  /tools [core|full]       Show or change tool set',
   '  /model [name]            Show or change model override',
@@ -78,11 +59,8 @@ const HELP_TEXT = [
   '  /share                   Export current session to .code-agent/share/*.md',
   '',
   'Input helpers',
-  '  @file                    Open a file picker and attach selected file content',
-  '  @file:query              Fuzzy match a file and attach its content',
-  '  @path/or/name            Attach matching file contents to your message',
   '  !command                 Run a shell command and send its output as context',
-  '  Tab on empty prompt      Switch between build and plan',
+  '  Tab on empty prompt      Cycle through agent modes',
 ].join('\n');
 
 const colorEnabled = process.stdout.isTTY && process.env.NO_COLOR !== '1';
@@ -134,30 +112,19 @@ export async function startTui(args: string[] = []): Promise<void> {
     input: process.stdin,
     output: process.stdout,
     historySize: 100,
-    completer: (line: string) => completeInput(paths.root, line),
   });
 
-  const uninstallInputKeyHandlers = installInputKeyHandlers(rl, state);
   printBanner(state);
 
   try {
     while (true) {
-      const line = (await questionWithPrefill(rl, promptLabel(state), state.pendingInputLine)).trim();
-      state.pendingInputLine = undefined;
-      if (state.skipNextSubmittedLine) {
-        state.skipNextSubmittedLine = false;
-        if (line) {
-          state.pendingInputLine = line;
-        }
-        continue;
-      }
+      const line = (await rl.question(promptLabel(state))).trim();
 
       if (!line) {
         continue;
       }
 
       if (line.startsWith('/')) {
-        clearLiveFileSuggestions(state, rl);
         const shouldExit = await handleSlashCommand(line, state, rl);
         if (shouldExit) {
           break;
@@ -167,12 +134,10 @@ export async function startTui(args: string[] = []): Promise<void> {
 
       const prompt = line.startsWith('!')
         ? await shellPrompt(state.projectRoot, line.slice(1).trim())
-        : await expandFileReferences(state.projectRoot, line, rl);
-      clearLiveFileSuggestions(state, rl);
+        : line;
       await runPrompt(prompt, state, rl);
     }
   } finally {
-    uninstallInputKeyHandlers();
     rl.close();
     await closeBrowserSession();
   }
@@ -564,7 +529,6 @@ async function chooseSession(state: TuiState, rl: Interface): Promise<void> {
     state.session = selected;
     state.agent = selected.agent;
     state.model = selected.model;
-    state.undone = undefined;
     printNotice('Session', state.session.id);
   } finally {
     store.close();
@@ -669,141 +633,6 @@ async function initAgentsFile(projectRoot: string): Promise<void> {
   printNotice('Created', filePath);
 }
 
-async function expandFileReferences(projectRoot: string, input: string, rl: Interface): Promise<string> {
-  const refs = Array.from(new Set(input.match(/@[^@\s]*/g) ?? []))
-    .map((token) => token.slice(1))
-    .filter((token) => token.length > 0);
-  if (refs.length === 0) {
-    return input;
-  }
-
-  const attachments: string[] = [];
-  for (const ref of refs) {
-    const filePath = await resolveFileToken(projectRoot, ref, rl);
-    if (!filePath) {
-      attachments.push(`File reference not found: @${ref}`);
-      continue;
-    }
-
-    const content = await readTextFileLimited(path.join(projectRoot, filePath), 48 * 1024);
-    attachments.push([
-      `File: ${filePath}`,
-      '```',
-      content,
-      '```',
-    ].join('\n'));
-  }
-
-  return `${input}\n\nAttached file context:\n\n${attachments.join('\n\n')}`;
-}
-
-async function resolveFileToken(projectRoot: string, ref: string, rl: Interface): Promise<string | undefined> {
-  if (ref === 'file') {
-    return chooseFileReference(projectRoot, rl);
-  }
-
-  if (ref.startsWith('file:')) {
-    const query = ref.slice('file:'.length).trim();
-    if (!query) {
-      return chooseFileReference(projectRoot, rl);
-    }
-    return resolveFileReference(projectRoot, query);
-  }
-
-  return resolveFileReference(projectRoot, ref);
-}
-
-async function chooseFileReference(projectRoot: string, rl: Interface): Promise<string | undefined> {
-  const query = (await rl.question(`${cyan('Attach file')} ${dim('search:')} `)).trim();
-  if (!query) {
-    printWarning('File attach cancelled.');
-    return undefined;
-  }
-
-  const matches = await searchFileReferences(projectRoot, query, 10);
-  if (matches.length === 0) {
-    printWarning(`No files matched: ${query}`);
-    return undefined;
-  }
-
-  console.log(bold(cyan('File matches')));
-  matches.forEach((file, index) => {
-    console.log(`  ${cyan(String(index + 1).padStart(2, ' '))}. ${file}`);
-  });
-
-  const answer = (await rl.question(`${cyan('Select file')} ${dim('[1]:')} `)).trim();
-  if (!answer) {
-    printNotice('Attached', matches[0]!);
-    return matches[0];
-  }
-
-  const selectedIndex = Number(answer);
-  if (Number.isInteger(selectedIndex) && selectedIndex >= 1 && selectedIndex <= matches.length) {
-    const selected = matches[selectedIndex - 1]!;
-    printNotice('Attached', selected);
-    return selected;
-  }
-
-  const direct = matches.find((file) => file === answer) ?? await resolveFileReference(projectRoot, answer);
-  if (direct) {
-    printNotice('Attached', direct);
-    return direct;
-  }
-
-  printWarning('Invalid file selection.');
-  return undefined;
-}
-
-async function resolveFileReference(projectRoot: string, query: string): Promise<string | undefined> {
-  const normalized = query.replace(/^file:\/\//, '');
-  const direct = path.isAbsolute(normalized)
-    ? normalized
-    : path.join(projectRoot, normalized);
-  if (direct.startsWith(projectRoot) && fs.existsSync(direct) && fs.statSync(direct).isFile()) {
-    return path.relative(projectRoot, direct).replace(/\\/g, '/');
-  }
-
-  return (await searchFileReferences(projectRoot, query, 1))[0];
-}
-
-async function searchFileReferences(projectRoot: string, query: string, limit: number): Promise<string[]> {
-  const files = await listProjectFiles(projectRoot);
-  return scoreFiles(files, query, limit);
-}
-
-function completeInput(projectRoot: string, line: string): [string[], string] {
-  const slash = /^\/([^\s]*)$/.exec(line);
-  if (slash) {
-    const commands = [
-      '/help',
-      '/exit',
-      '/new',
-      '/sessions',
-      '/agent',
-      '/tools',
-      '/model',
-      '/max-steps',
-      '/details',
-      '/init',
-      '/undo',
-      '/redo',
-      '/share',
-    ];
-    return [commands.filter((command) => command.startsWith(line)), line];
-  }
-
-  const at = /@([^@\s]*)$/.exec(line);
-  if (!at) {
-    return [[], line];
-  }
-
-  try {
-    return [completeFileReferenceLine(line, listProjectFilesSync(projectRoot), 30), line];
-  } catch {
-    return [[], line];
-  }
-}
-
 async function shellPrompt(projectRoot: string, command: string): Promise<string> {
   if (!command) {
     return 'No shell command was provided.';
@@ -849,213 +678,11 @@ function runShell(cwd: string, command: string): Promise<{ exitCode: number; std
   });
 }
 
-function installInputKeyHandlers(rl: Interface, state: TuiState): () => void {
-  readline.emitKeypressEvents(process.stdin, rl);
-  if (!process.stdin.isTTY) {
-    return () => {};
-  }
-
-  const previousRawMode = process.stdin.isRaw;
-  process.stdin.setRawMode(true);
-
-  const onKeypress = (_text: string | undefined, key: readline.Key | undefined): void => {
-    if (key?.ctrl && key.name === 'c') {
-      clearLiveFileSuggestions(state, rl);
-      process.stdin.setRawMode(previousRawMode);
-      console.log('');
-      process.kill(process.pid, 'SIGINT');
-      return;
-    }
-
-    if (key?.name === 'return' && acceptLiveFileSuggestion(rl, state, false)) {
-      return;
-    }
-
-    if (key?.name === 'tab' && acceptLiveFileSuggestion(rl, state, true)) {
-      return;
-    }
-
-    if (key?.name === 'return') {
-      clearLiveFileSuggestions(state, rl);
-      return;
-    }
-
-    if (key?.name === 'tab') {
-      if (rl.line.trim().length === 0) {
-        clearLiveFileSuggestions(state, rl);
-        cycleAgent(state);
-        console.log(`\n${badge('agent', 'cyan')} ${state.agent}`);
-        rl.prompt();
-      }
-      return;
-    }
-
-    if (key?.name === 'up' && moveLiveFileSuggestionSelection(state, -1)) {
-      renderLiveFileSuggestions(rl, state, { force: true });
-      return;
-    }
-
-    if (key?.name === 'down' && moveLiveFileSuggestionSelection(state, 1)) {
-      renderLiveFileSuggestions(rl, state, { force: true });
-      return;
-    }
-
-    setImmediate(() => renderLiveFileSuggestions(rl, state));
-  };
-
-  process.stdin.on('keypress', onKeypress);
-
-  return () => {
-    process.stdin.off('keypress', onKeypress);
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(previousRawMode);
-    }
-  };
-}
-
 function cycleAgent(state: TuiState): void {
-  state.agent = state.agent === 'build' ? 'plan' : 'build';
-}
-
-function renderLiveFileSuggestions(rl: Interface, state: TuiState, options: { force?: boolean } = {}): void {
-  if (!process.stdout.isTTY) {
-    return;
-  }
-
-  const result = suggestFileReferences(rl.line, getCachedProjectFiles(state), 8);
-  if (!result) {
-    clearLiveFileSuggestions(state, rl);
-    state.liveFileSuggestionSignature = undefined;
-    state.liveFileSuggestions = undefined;
-    state.liveFileSuggestionQuery = undefined;
-    state.liveFileSuggestionSelectedIndex = undefined;
-    return;
-  }
-
-  const previousQuery = state.liveFileSuggestionQuery;
-  state.liveFileSuggestions = result.suggestions;
-  state.liveFileSuggestionQuery = result.query;
-  if (previousQuery !== result.query || state.liveFileSuggestionSelectedIndex === undefined) {
-    state.liveFileSuggestionSelectedIndex = 0;
-  }
-  if (result.suggestions.length > 0) {
-    state.liveFileSuggestionSelectedIndex = Math.min(state.liveFileSuggestionSelectedIndex, result.suggestions.length - 1);
-  }
-
-  const signature = `${result.query}\u0000${result.suggestions.join('\u0000')}`;
-  if (!options.force && signature === state.liveFileSuggestionSignature) {
-    return;
-  }
-  state.liveFileSuggestionSignature = signature;
-
-  const rows = formatFileSuggestionRows(
-    result.query,
-    result.suggestions,
-    state.liveFileSuggestionSelectedIndex ?? 0,
-    terminalWidth() - 1,
-    8
-  ).map((row, index) => index === 0 ? dim(row) : row);
-  drawLiveFileSuggestions(rl, state, rows);
-}
-
-function moveLiveFileSuggestionSelection(state: TuiState, delta: number): boolean {
-  const suggestions = state.liveFileSuggestions ?? [];
-  if (!state.liveFileSuggestionVisible || suggestions.length === 0) {
-    return false;
-  }
-
-  state.liveFileSuggestionSelectedIndex = moveFileReferenceSelection(
-    state.liveFileSuggestionSelectedIndex ?? 0,
-    delta,
-    suggestions.length
-  );
-  return true;
-}
-
-function acceptLiveFileSuggestion(rl: Interface, state: TuiState, shouldSubmit: boolean): boolean {
-  const suggestions = state.liveFileSuggestions ?? [];
-  if (!state.liveFileSuggestionVisible || suggestions.length === 0) {
-    return false;
-  }
-
-  const selected = suggestions[state.liveFileSuggestionSelectedIndex ?? 0];
-  if (!selected) {
-    return false;
-  }
-
-  const nextInput = prepareSelectedFileReferenceInput(rl.line, selected, shouldSubmit);
-  rl.write('', { ctrl: true, name: 'u' });
-  rl.write(nextInput.line);
-  if (!nextInput.shouldSubmit) {
-    state.pendingInputLine = nextInput.line;
-    state.skipNextSubmittedLine = true;
-  }
-  clearLiveFileSuggestions(state, rl);
-  return true;
-}
-
-function questionWithPrefill(rl: Interface, query: string, prefill: string | undefined): Promise<string> {
-  const answer = rl.question(query);
-  if (prefill) {
-    setImmediate(() => rl.write(prefill));
-  }
-  return answer;
-}
-
-function getCachedProjectFiles(state: TuiState): string[] {
-  state.fileReferenceFiles ??= listProjectFilesSync(state.projectRoot);
-  return state.fileReferenceFiles;
-}
-
-function drawLiveFileSuggestions(rl: Interface, state: TuiState, rows: string[]): void {
-  clearRenderedLiveFileSuggestionLine(rl, state);
-  for (const row of rows) {
-    process.stdout.write('\n');
-    readline.cursorTo(process.stdout, 0);
-    readline.clearLine(process.stdout, 0);
-    process.stdout.write(row);
-  }
-  readline.cursorTo(process.stdout, 0);
-  readline.moveCursor(process.stdout, 0, -rows.length);
-  refreshReadlineLine(rl);
-  state.liveFileSuggestionVisible = true;
-  state.liveFileSuggestionRowCount = rows.length;
-}
-
-function clearLiveFileSuggestions(state: TuiState, rl?: Interface): void {
-  clearRenderedLiveFileSuggestionLine(rl, state);
-  state.liveFileSuggestionSignature = undefined;
-  state.liveFileSuggestions = undefined;
-  state.liveFileSuggestionQuery = undefined;
-  state.liveFileSuggestionSelectedIndex = undefined;
-  state.liveFileSuggestionRowCount = undefined;
-}
-
-function clearRenderedLiveFileSuggestionLine(rl: Interface | undefined, state: TuiState): void {
-  if (!state.liveFileSuggestionVisible || !process.stdout.isTTY) {
-    return;
-  }
-
-  const rowCount = state.liveFileSuggestionRowCount ?? 1;
-  for (let index = 0; index < rowCount; index += 1) {
-    process.stdout.write('\n');
-    readline.cursorTo(process.stdout, 0);
-    readline.clearLine(process.stdout, 0);
-  }
-  readline.cursorTo(process.stdout, 0);
-  readline.moveCursor(process.stdout, 0, -rowCount);
-  if (rl) {
-    refreshReadlineLine(rl);
-  }
-  state.liveFileSuggestionVisible = false;
-  state.liveFileSuggestionRowCount = undefined;
-}
-
-function refreshReadlineLine(rl: Interface): void {
-  const refresh = (rl as unknown as { _refreshLine?: () => void })._refreshLine;
-  if (refresh) {
-    refresh.call(rl);
-  }
+  const agents: AgentName[] = ['build', 'plan', 'general', 'explore', 'scout', 'review', 'refactor', 'test', 'doc', 'debug'];
+  const currentIndex = agents.indexOf(state.agent);
+  const nextIndex = (currentIndex + 1) % agents.length;
+  state.agent = agents[nextIndex];
 }
 
 function printBanner(state: TuiState): void {
@@ -1066,7 +693,7 @@ function printBanner(state: TuiState): void {
     `${dim('Project')} ${state.projectRoot}`,
     `${dim('Session')} ${state.session.id}`,
     `${dim('Agent')} ${state.agent}    ${dim('Tools')} ${state.toolMode}`,
-    `${dim('Type')} ${cyan('/help')} ${dim('for commands,')} ${cyan('@file')} ${dim('to attach files,')} ${cyan('/exit')} ${dim('to quit')}`,
+    `${dim('Type')} ${cyan('/help')} ${dim('for commands,')} ${cyan('!command')} ${dim('to run shell,')} ${cyan('/exit')} ${dim('to quit')}`,
   ];
   console.log(box(rows, width));
 }
@@ -1077,10 +704,10 @@ function promptLabel(state: TuiState): string {
 }
 
 function parseAgentName(value: string | undefined): AgentName {
-  if (value === 'build' || value === 'plan') {
+  if (value === 'build' || value === 'plan' || value === 'general' || value === 'explore' || value === 'scout' || value === 'review' || value === 'refactor' || value === 'test' || value === 'doc' || value === 'debug') {
     return value;
   }
-  throw new Error(`Invalid agent: ${value ?? ''}. Expected "build" or "plan".`);
+  throw new Error(`Invalid agent: ${value ?? ''}. Expected one of: build, plan, general, explore, scout, review, refactor, test, doc, debug.`);
 }
 
 function parseToolMode(value: string | undefined): LocalToolMode {
@@ -1104,30 +731,6 @@ function requireValue(value: string | undefined, name: string): string {
     throw new Error(`Missing value for ${name}`);
   }
   return value;
-}
-
-async function listProjectFiles(projectRoot: string): Promise<string[]> {
-  const result = await runShell(projectRoot, projectFilesCommand());
-  return parseProjectFilesOutput(result.stdout);
-}
-
-function listProjectFilesSync(projectRoot: string): string[] {
-  const result = spawnSyncText(projectRoot, projectFilesCommand());
-  return parseProjectFilesOutput(result);
-}
-
-function spawnSyncText(cwd: string, command: string): string {
-  const child = spawnSync('/bin/sh', ['-lc', command], {
-    cwd,
-    encoding: 'utf8',
-    maxBuffer: 8 * 1024 * 1024,
-  });
-  return child.stdout ?? '';
-}
-
-async function readTextFileLimited(filePath: string, maxBytes: number): Promise<string> {
-  const content = await fsp.readFile(filePath, 'utf8');
-  return truncate(content, maxBytes);
 }
 
 function truncate(value: string, maxLength: number): string {

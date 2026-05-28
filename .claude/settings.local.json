@@ -27,7 +27,12 @@
       "Bash(curl -s \"https://api.github.com/search/repositories?q=opencode+agent+steps\")",
       "Bash(curl -s \"https://api.github.com/search/code?q=opencode+max+steps+language:typescript\")",
       "Bash(code-agent --version)",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "Bash(git clone:*)",
+      "Bash(grep -E \"\\\\.\\(ts|js|json\\)$\")",
+      "Bash(ls:*)",
+      "Bash(mkdir -p ~/.local/bin)",
+      "Bash(ln -sf /Users/fengyue/PycharmProjects/CodeAgent/dist/bin/code-agent.js ~/.local/bin/code-agent)"
     ]
   }
 }

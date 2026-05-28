@@ -3,10 +3,21 @@ import {
   mergeAgentPermissions,
   permissionRule,
 } from './permission';
-import { BUILD_SYSTEM_PROMPT, PLAN_SYSTEM_PROMPT } from './prompts';
+import {
+  BUILD_SYSTEM_PROMPT,
+  PLAN_SYSTEM_PROMPT,
+  GENERAL_SYSTEM_PROMPT,
+  EXPLORE_SYSTEM_PROMPT,
+  SCOUT_SYSTEM_PROMPT,
+  REVIEW_SYSTEM_PROMPT,
+  REFACTOR_SYSTEM_PROMPT,
+  TEST_SYSTEM_PROMPT,
+  DOC_SYSTEM_PROMPT,
+  DEBUG_SYSTEM_PROMPT,
+} from './prompts';
 
-export type AgentName = 'build' | 'plan';
-export type AgentMode = 'primary';
+export type AgentName = 'build' | 'plan' | 'general' | 'explore' | 'scout' | 'review' | 'refactor' | 'test' | 'doc' | 'debug';
+export type AgentMode = 'primary' | 'subagent';
 
 export interface AgentInfo {
   name: AgentName;
@@ -91,9 +102,283 @@ export const planAgent: AgentInfo = {
   ),
 };
 
+export const generalAgent: AgentInfo = {
+  name: 'general',
+  mode: 'primary',
+  description: 'Versatile agent for complex, multi-step tasks. Full access to all tools including read, write, shell, and web.',
+  systemPrompt: GENERAL_SYSTEM_PROMPT,
+  maxSteps: DEFAULT_MAX_STEPS,
+  permission: mergeAgentPermissions(
+    basePermissions,
+    [
+      // Full access to workspace operations
+      permissionRule('workspace.apply_patch', 'allow'),
+      permissionRule('workspace.edit', 'allow'),
+      permissionRule('workspace.write', 'allow'),
+      permissionRule('workspace.shell', 'allow'),
+      // Allow web access for research
+      permissionRule('web.fetch', 'allow'),
+      permissionRule('web.search', 'allow'),
+      permissionRule('browser.navigate', 'allow'),
+      permissionRule('browser.screenshot', 'allow'),
+      // Deny only dangerous operations
+      permissionRule('workspace.shell', 'deny', 'rm *'),
+      permissionRule('workspace.shell', 'deny', 'rm -rf *'),
+      permissionRule('workspace.shell', 'deny', 'git reset --hard*'),
+      permissionRule('workspace.shell', 'deny', 'git clean *'),
+      permissionRule('workspace.shell', 'deny', 'git push --force*'),
+      permissionRule('workspace.shell', 'deny', 'dd if=*'),
+    ]
+  ),
+};
+
+export const exploreAgent: AgentInfo = {
+  name: 'explore',
+  mode: 'primary',
+  description: 'Fast codebase exploration agent. Read-only access optimized for understanding code structure and relationships.',
+  systemPrompt: EXPLORE_SYSTEM_PROMPT,
+  maxSteps: 50, // Shorter for quick exploration
+  permission: mergeAgentPermissions(
+    basePermissions,
+    [
+      // Read-only workspace access
+      permissionRule('workspace.glob', 'allow'),
+      permissionRule('workspace.grep', 'allow'),
+      permissionRule('workspace.read', 'allow'),
+      permissionRule('workspace.git_diff', 'allow'),
+      // Deny all modifications
+      permissionRule('workspace.apply_patch', 'deny'),
+      permissionRule('workspace.edit', 'deny'),
+      permissionRule('workspace.write', 'deny'),
+      permissionRule('workspace.shell', 'deny'),
+      permissionRule('task.run', 'deny'),
+      // Deny web access (focus on local codebase)
+      permissionRule('web.fetch', 'deny'),
+      permissionRule('web.search', 'deny'),
+      permissionRule('browser.navigate', 'deny'),
+      permissionRule('browser.screenshot', 'deny'),
+    ]
+  ),
+};
+
+export const scoutAgent: AgentInfo = {
+  name: 'scout',
+  mode: 'primary',
+  description: 'External documentation and dependency research agent. Read-only with web access for gathering external information.',
+  systemPrompt: SCOUT_SYSTEM_PROMPT,
+  maxSteps: 50, // Shorter for focused research
+  permission: mergeAgentPermissions(
+    basePermissions,
+    [
+      // Read-only workspace access
+      permissionRule('workspace.glob', 'allow'),
+      permissionRule('workspace.grep', 'allow'),
+      permissionRule('workspace.read', 'allow'),
+      permissionRule('workspace.git_diff', 'allow'),
+      // Deny all modifications
+      permissionRule('workspace.apply_patch', 'deny'),
+      permissionRule('workspace.edit', 'deny'),
+      permissionRule('workspace.write', 'deny'),
+      permissionRule('workspace.shell', 'deny'),
+      permissionRule('task.run', 'deny'),
+      // Allow web access for research
+      permissionRule('web.fetch', 'allow'),
+      permissionRule('web.search', 'allow'),
+      permissionRule('browser.navigate', 'allow'),
+      permissionRule('browser.screenshot', 'allow'),
+    ]
+  ),
+};
+
+export const reviewAgent: AgentInfo = {
+  name: 'review',
+  mode: 'primary',
+  description: 'Code review specialist. Analyzes code quality, security vulnerabilities, performance issues, and architectural problems. Read-only with optional web search for security advisories.',
+  systemPrompt: REVIEW_SYSTEM_PROMPT,
+  maxSteps: 50, // Focused review sessions
+  permission: mergeAgentPermissions(
+    basePermissions,
+    [
+      // Read-only workspace access
+      permissionRule('workspace.glob', 'allow'),
+      permissionRule('workspace.grep', 'allow'),
+      permissionRule('workspace.read', 'allow'),
+      permissionRule('workspace.git_diff', 'allow'),
+      // Code graph analysis (full access)
+      permissionRule('code_graph.*', 'allow'),
+      // Deny all modifications
+      permissionRule('workspace.apply_patch', 'deny'),
+      permissionRule('workspace.edit', 'deny'),
+      permissionRule('workspace.write', 'deny'),
+      permissionRule('workspace.shell', 'deny'),
+      permissionRule('task.run', 'deny'),
+      // Optional web access for security research
+      permissionRule('web.fetch', 'ask'),
+      permissionRule('web.search', 'ask'),
+      permissionRule('browser.navigate', 'ask'),
+      permissionRule('browser.screenshot', 'deny'),
+      permissionRule('browser.close', 'allow'),
+    ]
+  ),
+};
+
+export const refactorAgent: AgentInfo = {
+  name: 'refactor',
+  mode: 'primary',
+  description: 'Safe refactoring specialist. Performs intelligent, incremental refactoring with comprehensive impact analysis. Always analyzes before modifying.',
+  systemPrompt: REFACTOR_SYSTEM_PROMPT,
+  maxSteps: 100, // Refactoring can take more steps
+  permission: mergeAgentPermissions(
+    basePermissions,
+    [
+      // Read-only workspace access
+      permissionRule('workspace.glob', 'allow'),
+      permissionRule('workspace.grep', 'allow'),
+      permissionRule('workspace.read', 'allow'),
+      permissionRule('workspace.git_diff', 'allow'),
+      // Code graph analysis (full access)
+      permissionRule('code_graph.*', 'allow'),
+      // Modifications require confirmation
+      permissionRule('workspace.edit', 'ask'),
+      permissionRule('workspace.write', 'ask'),
+      permissionRule('workspace.apply_patch', 'ask'),
+      // Shell for running tests (with confirmation)
+      permissionRule('workspace.shell', 'ask'),
+      // Deny dangerous operations
+      permissionRule('workspace.shell', 'deny', 'rm *'),
+      permissionRule('workspace.shell', 'deny', 'rm -rf *'),
+      permissionRule('workspace.shell', 'deny', 'git reset --hard*'),
+      permissionRule('workspace.shell', 'deny', 'git clean *'),
+      permissionRule('workspace.shell', 'deny', 'git push --force*'),
+      permissionRule('workspace.shell', 'deny', 'dd if=*'),
+      // Optional web access
+      permissionRule('web.fetch', 'ask'),
+      permissionRule('web.search', 'ask'),
+      permissionRule('browser.navigate', 'deny'),
+      permissionRule('browser.screenshot', 'deny'),
+    ]
+  ),
+};
+
+export const testAgent: AgentInfo = {
+  name: 'test',
+  mode: 'primary',
+  description: 'Test generation specialist. Analyzes code and generates comprehensive test cases with high coverage. Supports unit tests, integration tests, and edge cases.',
+  systemPrompt: TEST_SYSTEM_PROMPT,
+  maxSteps: 80, // Test generation is focused
+  permission: mergeAgentPermissions(
+    basePermissions,
+    [
+      // Read-only workspace access
+      permissionRule('workspace.glob', 'allow'),
+      permissionRule('workspace.grep', 'allow'),
+      permissionRule('workspace.read', 'allow'),
+      permissionRule('workspace.git_diff', 'allow'),
+      // Code graph analysis (full access)
+      permissionRule('code_graph.*', 'allow'),
+      // Can write test files
+      permissionRule('workspace.edit', 'allow'),
+      permissionRule('workspace.write', 'allow'),
+      permissionRule('workspace.apply_patch', 'allow'),
+      // Shell for running tests (with confirmation)
+      permissionRule('workspace.shell', 'ask'),
+      // Deny dangerous operations
+      permissionRule('workspace.shell', 'deny', 'rm *'),
+      permissionRule('workspace.shell', 'deny', 'rm -rf *'),
+      permissionRule('workspace.shell', 'deny', 'git reset --hard*'),
+      permissionRule('workspace.shell', 'deny', 'git clean *'),
+      permissionRule('workspace.shell', 'deny', 'git push --force*'),
+      permissionRule('workspace.shell', 'deny', 'dd if=*'),
+      // Optional web access for testing best practices
+      permissionRule('web.fetch', 'ask'),
+      permissionRule('web.search', 'ask'),
+      permissionRule('browser.navigate', 'deny'),
+      permissionRule('browser.screenshot', 'deny'),
+    ]
+  ),
+};
+
+export const docAgent: AgentInfo = {
+  name: 'doc',
+  mode: 'primary',
+  description: 'Documentation specialist. Generates API docs, README files, architecture documentation, and code comments. Keeps docs in sync with code.',
+  systemPrompt: DOC_SYSTEM_PROMPT,
+  maxSteps: 60, // Documentation is focused
+  permission: mergeAgentPermissions(
+    basePermissions,
+    [
+      // Read-only workspace access
+      permissionRule('workspace.glob', 'allow'),
+      permissionRule('workspace.grep', 'allow'),
+      permissionRule('workspace.read', 'allow'),
+      permissionRule('workspace.git_diff', 'allow'),
+      // Code graph analysis (full access)
+      permissionRule('code_graph.*', 'allow'),
+      // Can write documentation files
+      permissionRule('workspace.edit', 'allow'),
+      permissionRule('workspace.write', 'allow'),
+      permissionRule('workspace.apply_patch', 'allow'),
+      // No shell execution needed for docs
+      permissionRule('workspace.shell', 'deny'),
+      permissionRule('task.run', 'deny'),
+      // Optional web access for documentation best practices
+      permissionRule('web.fetch', 'ask'),
+      permissionRule('web.search', 'ask'),
+      permissionRule('browser.navigate', 'deny'),
+      permissionRule('browser.screenshot', 'deny'),
+    ]
+  ),
+};
+
+export const debugAgent: AgentInfo = {
+  name: 'debug',
+  mode: 'primary',
+  description: 'Debugging specialist. Diagnoses errors, traces root causes, and suggests verified fixes. Analyzes call chains and provides actionable solutions.',
+  systemPrompt: DEBUG_SYSTEM_PROMPT,
+  maxSteps: 70, // Debugging can take multiple steps
+  permission: mergeAgentPermissions(
+    basePermissions,
+    [
+      // Read-only workspace access
+      permissionRule('workspace.glob', 'allow'),
+      permissionRule('workspace.grep', 'allow'),
+      permissionRule('workspace.read', 'allow'),
+      permissionRule('workspace.git_diff', 'allow'),
+      // Code graph analysis (full access)
+      permissionRule('code_graph.*', 'allow'),
+      // Shell for diagnostic commands (with confirmation)
+      permissionRule('workspace.shell', 'ask'),
+      // Fixes require confirmation
+      permissionRule('workspace.edit', 'ask'),
+      permissionRule('workspace.write', 'deny'), // Don't create new files
+      permissionRule('workspace.apply_patch', 'ask'),
+      // Deny dangerous operations
+      permissionRule('workspace.shell', 'deny', 'rm *'),
+      permissionRule('workspace.shell', 'deny', 'rm -rf *'),
+      permissionRule('workspace.shell', 'deny', 'git reset --hard*'),
+      permissionRule('workspace.shell', 'deny', 'git clean *'),
+      permissionRule('workspace.shell', 'deny', 'git push --force*'),
+      permissionRule('workspace.shell', 'deny', 'dd if=*'),
+      // Optional web access for error research
+      permissionRule('web.fetch', 'ask'),
+      permissionRule('web.search', 'ask'),
+      permissionRule('browser.navigate', 'deny'),
+      permissionRule('browser.screenshot', 'deny'),
+    ]
+  ),
+};
+
 const agents: Record<AgentName, AgentInfo> = {
   build: buildAgent,
   plan: planAgent,
+  general: generalAgent,
+  explore: exploreAgent,
+  scout: scoutAgent,
+  review: reviewAgent,
+  refactor: refactorAgent,
+  test: testAgent,
+  doc: docAgent,
+  debug: debugAgent,
 };
 
 export function listAgents(): AgentInfo[] {
@@ -113,5 +398,5 @@ export function resolveAgent(name: string | undefined): AgentInfo | undefined {
 }
 
 export function isAgentName(value: string): value is AgentName {
-  return value === 'build' || value === 'plan';
+  return value === 'build' || value === 'plan' || value === 'general' || value === 'explore' || value === 'scout' || value === 'review' || value === 'refactor' || value === 'test' || value === 'doc' || value === 'debug';
 }
