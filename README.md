@@ -100,6 +100,35 @@ code-agent
 code-agent tui
 ```
 
+## 全局选项
+
+所有命令都支持以下全局选项，用于控制日志输出和错误处理：
+
+```bash
+--verbose       # 启用详细输出
+--debug         # 启用调试输出（包含更多技术细节）
+--quiet         # 静默模式，只显示错误
+--no-color      # 禁用彩色输出
+--log-file PATH # 将日志写入文件
+```
+
+示例：
+
+```bash
+# 详细模式索引项目
+code-agent index --verbose
+
+# 调试模式运行任务
+code-agent run "任务" --debug
+
+# 静默模式同步
+code-agent sync --quiet
+
+# 保存日志到文件
+code-agent index --log-file index.log
+```
+```
+
 如果没有配置全局命令，也可以直接用：
 
 ```bash

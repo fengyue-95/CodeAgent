@@ -23,6 +23,11 @@ import { createDeepSeekProvider } from '../provider';
 import { LocalToolMode, closeBrowserSession } from '../tool';
 import { SessionInfo } from '../session';
 import { startTui } from '../tui';
+import { Logger, LogLevel } from '../utils/logger';
+import { ErrorReporter } from '../utils/error-reporter';
+import { configureLogger, GlobalOptions, setupErrorHandlers } from '../utils/cli-helpers';
+import { CodeAgentError, ErrorCode, ErrorHandler } from '../utils/errors';
+import { parseGlobalOptions, stripGlobalOptions } from './parse-global-options';
 
 type Command =
   | 'run'
@@ -89,6 +94,13 @@ function usage(): string {
     '  refs <symbol> [projectPath]      Find references to a symbol',
     '  references <symbol> [projectPath] Alias for refs',
     '  serve [options] [projectPath]    Start the MCP stdio server',
+    '',
+    'Global options:',
+    '  --verbose                        Enable verbose output',
+    '  --debug                          Enable debug output',
+    '  --quiet                          Suppress non-error output',
+    '  --no-color                       Disable colored output',
+    '  --log-file <path>                Write logs to file',
     '',
     'Run options:',
     '  --agent <build|plan>             Agent to use; default: build',
@@ -169,6 +181,10 @@ function usage(): string {
     '      Install git hooks that keep the graph in sync.',
     '  code-agent git hook status .',
     '      Check whether git sync hooks are installed.',
+    '  code-agent index --verbose .',
+    '      Build the index with verbose logging.',
+    '  code-agent sync --debug .',
+    '      Sync with debug output for troubleshooting.',
   ].join('\n');
 }
 
@@ -344,7 +360,16 @@ function parseLimit(value: string | undefined, fallback = 20): number {
 
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new Error(`Invalid limit: ${value}`);
+    throw new CodeAgentError(
+      `Invalid limit: ${value}`,
+      ErrorCode.INVALID_ARGUMENT,
+      {
+        context: { value },
+        suggestions: [
+          { message: 'Limit must be a positive integer' },
+        ],
+      }
+    );
   }
 
   return parsed;
@@ -352,12 +377,27 @@ function parseLimit(value: string | undefined, fallback = 20): number {
 
 function parseOptionalNumber(value: string | undefined, name: string): number {
   if (!value) {
-    throw new Error(`Missing value for ${name}`);
+    throw new CodeAgentError(
+      `Missing value for ${name}`,
+      ErrorCode.INVALID_ARGUMENT,
+      {
+        context: { name },
+      }
+    );
   }
 
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) {
-    throw new Error(`Invalid ${name}: ${value}`);
+    throw new CodeAgentError(
+      `Invalid ${name}: ${value}`,
+      ErrorCode.INVALID_ARGUMENT,
+      {
+        context: { name, value },
+        suggestions: [
+          { message: `${name} must be a valid number` },
+        ],
+      }
+    );
   }
 
   return parsed;
@@ -495,11 +535,27 @@ function parseRunArgs(args: string[]): RunArgs {
   }
 
   if (!task) {
-    throw new Error('Missing task. Usage: code-agent run "<task>" [projectPath]');
+    throw new CodeAgentError(
+      'Missing task argument',
+      ErrorCode.INVALID_ARGUMENT,
+      {
+        suggestions: [
+          { message: 'Usage: code-agent run "<task>" [projectPath]' },
+        ],
+      }
+    );
   }
 
   if (sessionId && continueLatest) {
-    throw new Error('Use either --session or --continue, not both.');
+    throw new CodeAgentError(
+      'Cannot use both --session and --continue',
+      ErrorCode.INVALID_ARGUMENT,
+      {
+        suggestions: [
+          { message: 'Use either --session <id> or --continue, not both' },
+        ],
+      }
+    );
   }
 
   return { task, projectArg, agent, model, maxSteps, temperature, toolMode, sessionId, continueLatest };
@@ -510,7 +566,16 @@ function parseAgentName(value: string | undefined): AgentName {
     return value;
   }
 
-  throw new Error(`Invalid agent: ${value ?? ''}. Expected "build" or "plan".`);
+  throw new CodeAgentError(
+    `Invalid agent: ${value ?? ''}`,
+    ErrorCode.INVALID_ARGUMENT,
+    {
+      context: { value },
+      suggestions: [
+        { message: 'Expected "build" or "plan"' },
+      ],
+    }
+  );
 }
 
 function parseToolMode(value: string | undefined): LocalToolMode {
@@ -518,7 +583,16 @@ function parseToolMode(value: string | undefined): LocalToolMode {
     return value;
   }
 
-  throw new Error(`Invalid tool mode: ${value ?? ''}. Expected "core" or "full".`);
+  throw new CodeAgentError(
+    `Invalid tool mode: ${value ?? ''}`,
+    ErrorCode.INVALID_ARGUMENT,
+    {
+      context: { value },
+      suggestions: [
+        { message: 'Expected "core" or "full"' },
+      ],
+    }
+  );
 }
 
 function parseProjectFlag(arg: string, next: string | undefined): { consumed: boolean; value?: string } | undefined {
@@ -704,12 +778,15 @@ function printContext(context: GraphContextResult): void {
   }
 }
 
-async function runIndex(projectArg?: string): Promise<void> {
+async function runIndex(projectArg?: string, logger?: Logger): Promise<void> {
   const paths = resolveProjectPaths(projectArg);
   ensureStateDir(paths.stateDir);
 
   const { store, service } = await createIndexService(paths.dbPath);
   try {
+    if (logger) {
+      logger.info('Starting index operation', { projectRoot: paths.root });
+    }
     console.log(`Indexing project: ${paths.root}`);
     await service.indexAll(paths.root);
     const stats = store.getStats();
@@ -718,6 +795,9 @@ async function runIndex(projectArg?: string): Promise<void> {
     console.log(`Edges: ${stats.edgeCount}`);
     console.log(`Unresolved refs: ${stats.unresolvedRefCount}`);
     console.log(`Database: ${paths.dbPath}`);
+    if (logger) {
+      logger.info('Index operation completed', { stats });
+    }
   } finally {
     store.close();
   }
@@ -774,7 +854,16 @@ function resolveLatestSessionId(dbPath: string): string {
   try {
     const session = store.sessions().listSessions(1)[0];
     if (!session) {
-      throw new Error('No existing sessions. Run `code-agent session new` first or omit --continue.');
+      throw new CodeAgentError(
+        'No existing sessions found',
+        ErrorCode.NOT_FOUND,
+        {
+          suggestions: [
+            { message: 'Run "code-agent session new" to create a session first' },
+            { message: 'Or omit --continue to create a new session automatically' },
+          ],
+        }
+      );
     }
     return session.id;
   } finally {
@@ -915,12 +1004,15 @@ function printSession(session: SessionInfo): void {
   console.log(`updated: ${formatTimestamp(session.updatedAt)}`);
 }
 
-async function runSync(projectArg?: string): Promise<void> {
+async function runSync(projectArg?: string, logger?: Logger): Promise<void> {
   const paths = resolveProjectPaths(projectArg);
   ensureStateDir(paths.stateDir);
 
   const { store, service } = await createIndexService(paths.dbPath);
   try {
+    if (logger) {
+      logger.info('Starting sync operation', { projectRoot: paths.root });
+    }
     console.log(`Syncing project: ${paths.root}`);
     const result = await service.sync(paths.root);
     const stats = store.getStats();
@@ -929,6 +1021,9 @@ async function runSync(projectArg?: string): Promise<void> {
     console.log(`Nodes: ${stats.nodeCount}`);
     console.log(`Edges: ${stats.edgeCount}`);
     console.log(`Unresolved refs: ${stats.unresolvedRefCount}`);
+    if (logger) {
+      logger.info('Sync operation completed', { result, stats });
+    }
   } finally {
     store.close();
   }
@@ -941,7 +1036,16 @@ async function runWatch(args: string[]): Promise<void> {
 
   const disabledReason = watchDisabledReason(paths.root);
   if (disabledReason) {
-    throw new Error(`watch disabled: ${disabledReason}`);
+    throw new CodeAgentError(
+      'Watch is disabled',
+      ErrorCode.INTERNAL,
+      {
+        context: { reason: disabledReason },
+        suggestions: [
+          { message: 'Check if the required tools are installed' },
+        ],
+      }
+    );
   }
 
   const { store, service } = await createIndexService(paths.dbPath);
@@ -973,7 +1077,16 @@ async function runWatch(args: string[]): Promise<void> {
   const started = watcher.start();
   if (!started) {
     store.close();
-    throw new Error('Failed to start file watcher.');
+    throw new CodeAgentError(
+      'Failed to start file watcher',
+      ErrorCode.INTERNAL,
+      {
+        suggestions: [
+          { message: 'Check if the project directory is accessible' },
+          { message: 'Verify that file watching is supported on this system' },
+        ],
+      }
+    );
   }
 
   console.log(`Watching project: ${paths.root}`);
@@ -1028,9 +1141,29 @@ async function runGit(args: string[]): Promise<void> {
       console.log(`Git hooks: ${installed ? 'installed' : 'not installed'}`);
       return;
     }
+
+    throw new CodeAgentError(
+      `Invalid git hook action: ${action}`,
+      ErrorCode.INVALID_ARGUMENT,
+      {
+        context: { action },
+        suggestions: [
+          { message: 'Valid actions: install, remove, status' },
+        ],
+      }
+    );
   }
 
-  throw new Error('Usage: code-agent git sync [projectPath] | code-agent git hook <install|remove|status> [projectPath]');
+  throw new CodeAgentError(
+    'Invalid git command',
+    ErrorCode.INVALID_ARGUMENT,
+    {
+      suggestions: [
+        { message: 'Usage: code-agent git sync [projectPath]' },
+        { message: 'Usage: code-agent git hook <install|remove|status> [projectPath]' },
+      ],
+    }
+  );
 }
 
 function runStats(projectArg?: string): void {
@@ -1304,7 +1437,15 @@ function printGitHookResult(action: string, result: { hooksDir: string | null; h
 
 function runSearch(query: string | undefined, projectArg?: string): void {
   if (!query) {
-    throw new Error('Missing search query. Usage: code-agent search <symbol> [projectPath]');
+    throw new CodeAgentError(
+      'Missing search query',
+      ErrorCode.INVALID_ARGUMENT,
+      {
+        suggestions: [
+          { message: 'Usage: code-agent search <symbol> [projectPath]' },
+        ],
+      }
+    );
   }
 
   const paths = resolveProjectPaths(projectArg);
@@ -1328,7 +1469,15 @@ function runSearch(query: string | undefined, projectArg?: string): void {
 
 function runNode(query: string | undefined, projectArg?: string): void {
   if (!query) {
-    throw new Error('Missing symbol. Usage: code-agent node <symbol-or-node-id> [projectPath]');
+    throw new CodeAgentError(
+      'Missing symbol argument',
+      ErrorCode.INVALID_ARGUMENT,
+      {
+        suggestions: [
+          { message: 'Usage: code-agent node <symbol-or-node-id> [projectPath]' },
+        ],
+      }
+    );
   }
 
   const paths = resolveProjectPaths(projectArg);
@@ -1350,7 +1499,15 @@ function runNode(query: string | undefined, projectArg?: string): void {
 
 function runContext(query: string | undefined, projectArg?: string): void {
   if (!query) {
-    throw new Error('Missing query. Usage: code-agent context <query> [projectPath]');
+    throw new CodeAgentError(
+      'Missing query argument',
+      ErrorCode.INVALID_ARGUMENT,
+      {
+        suggestions: [
+          { message: 'Usage: code-agent context <query> [projectPath]' },
+        ],
+      }
+    );
   }
 
   const paths = resolveProjectPaths(projectArg);
@@ -1366,7 +1523,15 @@ function runContext(query: string | undefined, projectArg?: string): void {
 
 function runCallers(query: string | undefined, projectArg?: string): void {
   if (!query) {
-    throw new Error('Missing symbol. Usage: code-agent callers <symbol> [projectPath]');
+    throw new CodeAgentError(
+      'Missing symbol argument',
+      ErrorCode.INVALID_ARGUMENT,
+      {
+        suggestions: [
+          { message: 'Usage: code-agent callers <symbol> [projectPath]' },
+        ],
+      }
+    );
   }
 
   const paths = resolveProjectPaths(projectArg);
@@ -1392,7 +1557,15 @@ function runCallers(query: string | undefined, projectArg?: string): void {
 
 function runCallees(query: string | undefined, projectArg?: string): void {
   if (!query) {
-    throw new Error('Missing symbol. Usage: code-agent callees <symbol> [projectPath]');
+    throw new CodeAgentError(
+      'Missing symbol argument',
+      ErrorCode.INVALID_ARGUMENT,
+      {
+        suggestions: [
+          { message: 'Usage: code-agent callees <symbol> [projectPath]' },
+        ],
+      }
+    );
   }
 
   const paths = resolveProjectPaths(projectArg);
@@ -1418,7 +1591,15 @@ function runCallees(query: string | undefined, projectArg?: string): void {
 
 function runReferences(query: string | undefined, projectArg?: string): void {
   if (!query) {
-    throw new Error('Missing symbol. Usage: code-agent refs <symbol> [projectPath]');
+    throw new CodeAgentError(
+      'Missing symbol argument',
+      ErrorCode.INVALID_ARGUMENT,
+      {
+        suggestions: [
+          { message: 'Usage: code-agent refs <symbol> [projectPath]' },
+        ],
+      }
+    );
   }
 
   const paths = resolveProjectPaths(projectArg);
@@ -1443,6 +1624,14 @@ function runReferences(query: string | undefined, projectArg?: string): void {
 }
 
 async function main(): Promise<void> {
+  // Parse global options
+  const globalOptions = parseGlobalOptions(process.argv.slice(2));
+
+  // Configure logger and error handling
+  const logger = configureLogger(globalOptions);
+  const reporter = new ErrorReporter(logger);
+  setupErrorHandlers(logger, reporter, globalOptions.verbose || globalOptions.debug || false);
+
   const rawCommand = process.argv[2];
   const firstArg = process.argv[3];
   const projectArg = process.argv[4];
@@ -1464,11 +1653,16 @@ async function main(): Promise<void> {
   }
 
   if (!isCommand(rawCommand)) {
-    console.error(`Unknown command: ${rawCommand}`);
-    console.error('');
-    console.error(usage());
-    process.exitCode = 1;
-    return;
+    throw new CodeAgentError(
+      `Unknown command: ${rawCommand}`,
+      ErrorCode.INVALID_ARGUMENT,
+      {
+        context: { command: rawCommand },
+        suggestions: [
+          { message: 'Run code-agent --help to see available commands' },
+        ],
+      }
+    );
   }
 
   const command = rawCommand;
@@ -1501,12 +1695,12 @@ async function main(): Promise<void> {
   }
 
   if (command === 'index') {
-    await runIndex(firstArg);
+    await runIndex(firstArg, logger);
     return;
   }
 
   if (command === 'sync') {
-    await runSync(firstArg);
+    await runSync(firstArg, logger);
     return;
   }
 
@@ -1569,7 +1763,10 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.stack ?? error.message : String(error);
-  console.error(message);
+  const logger = new Logger({ colors: process.stdout.isTTY });
+  const reporter = new ErrorReporter(logger);
+  const verbose = process.argv.includes('--verbose') || process.argv.includes('--debug');
+
+  reporter.report(error, verbose);
   process.exit(1);
 });
