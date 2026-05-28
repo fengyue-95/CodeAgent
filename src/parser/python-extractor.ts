@@ -1,9 +1,11 @@
-import { Node as SyntaxNode } from 'web-tree-sitter';
+import Parser from 'web-tree-sitter';
 import { LanguageParser } from './index';
 import { getParser } from './grammars';
 import { CodeEdge, CodeNode, FileRecord, NodeKind, ParseResult, UnresolvedRef } from '../types';
 import { sha256 } from '../utils/hash';
 import { getChildByField, getNodeText, namedChildren, normalizeWhitespace } from './common';
+
+type SyntaxNode = Parser.SyntaxNode;
 
 interface ContainerFrame {
   id: string;

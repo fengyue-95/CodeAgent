@@ -1,5 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import pLimit from 'p-limit';
 import { LanguageParser } from '../parser';
 import { ProjectScanner } from '../scanner';
 import { GraphStore } from '../store/queries';
@@ -7,9 +8,18 @@ import { detectLanguage } from '../utils/language';
 import { ReferenceResolver } from '../resolver';
 import { CodeEdge, CodeNode } from '../types';
 
+export interface ProgressCallback {
+  (current: number, total: number, file?: string, phase?: 'parsing' | 'resolving'): void;
+}
+
+export interface IndexOptions {
+  concurrency?: number;
+  onProgress?: ProgressCallback;
+}
+
 export interface IndexService {
-  indexAll(root: string): Promise<void>;
-  sync(root: string): Promise<SyncResult>;
+  indexAll(root: string, options?: IndexOptions): Promise<void>;
+  sync(root: string, options?: { diff?: boolean } & IndexOptions): Promise<SyncResult>;
 }
 
 export interface SyncResult {
@@ -49,6 +59,8 @@ interface GraphSnapshot {
 }
 
 export class CodeIndexService implements IndexService {
+  private readonly defaultConcurrency = 10;
+
   constructor(
     private readonly scanner: ProjectScanner,
     private readonly parsers: LanguageParser[],
@@ -56,12 +68,12 @@ export class CodeIndexService implements IndexService {
     private readonly store: GraphStore
   ) {}
 
-  async indexAll(root: string): Promise<void> {
+  async indexAll(root: string, options: IndexOptions = {}): Promise<void> {
     const files = await this.scanner.scanAll(root);
-    await this.indexFiles(root, files);
+    await this.indexFiles(root, files, options);
   }
 
-  async sync(root: string, options: { diff?: boolean } = {}): Promise<SyncResult> {
+  async sync(root: string, options: { diff?: boolean } & IndexOptions = {}): Promise<SyncResult> {
     const changes = await this.scanner.scanChanged(root);
     const changedFiles = Array.from(new Set([...changes.added, ...changes.modified]));
     const diffFiles = Array.from(new Set([...changedFiles, ...changes.deleted]));
@@ -74,7 +86,7 @@ export class CodeIndexService implements IndexService {
       this.store.deleteFile(deletedFile);
     }
 
-    await this.indexFiles(root, changedFiles);
+    await this.indexFiles(root, changedFiles, options);
     const after = options.diff ? this.snapshotFiles(diffFiles) : null;
 
     return {
@@ -115,25 +127,55 @@ export class CodeIndexService implements IndexService {
     };
   }
 
-  private async indexFiles(root: string, files: string[]): Promise<void> {
-    for (const relativePath of files) {
-      const absolutePath = path.join(root, relativePath);
-      const language = detectLanguage(relativePath);
-      const parser = this.parsers.find((candidate) => candidate.supports(language));
-      if (!parser) {
-        continue;
-      }
+  private async indexFiles(root: string, files: string[], options: IndexOptions = {}): Promise<void> {
+    const concurrency = options.concurrency ?? this.defaultConcurrency;
+    const limit = pLimit(concurrency);
+    let completed = 0;
 
-      const content = await fs.readFile(absolutePath, 'utf8');
-      const parseResult = await parser.parse(relativePath, content);
-      this.store.replaceFileGraph(parseResult);
+    // Phase 1: Parse files
+    const parseResults = await Promise.all(
+      files.map((relativePath) =>
+        limit(async () => {
+          const absolutePath = path.join(root, relativePath);
+          const language = detectLanguage(relativePath);
+          const parser = this.parsers.find((candidate) => candidate.supports(language));
+          if (!parser) {
+            completed++;
+            options.onProgress?.(completed, files.length, relativePath, 'parsing');
+            return null;
+          }
+
+          const content = await fs.readFile(absolutePath, 'utf8');
+          const result = await parser.parse(relativePath, content);
+
+          completed++;
+          options.onProgress?.(completed, files.length, relativePath, 'parsing');
+
+          return result;
+        })
+      )
+    );
+
+    // Store parsed results
+    for (const parseResult of parseResults) {
+      if (parseResult) {
+        this.store.replaceFileGraph(parseResult);
+      }
     }
 
-    await this.rebuildResolvedEdges();
+    // Phase 2: Resolve references
+    await this.rebuildResolvedEdges(options);
   }
 
-  private async rebuildResolvedEdges(): Promise<void> {
+  private async rebuildResolvedEdges(options: IndexOptions = {}): Promise<void> {
     const unresolvedRefs = this.store.getAllUnresolvedRefs();
+    if (unresolvedRefs.length === 0) {
+      return;
+    }
+
+    // Report resolving phase start
+    options.onProgress?.(0, 1, `Processing ${unresolvedRefs.length} references...`, 'resolving');
+
     const result = this.resolver.resolveDetailed
       ? await this.resolver.resolveDetailed(unresolvedRefs)
       : {
@@ -142,14 +184,26 @@ export class CodeIndexService implements IndexService {
         nodes: [],
       };
 
-    this.store.insertNodes(result.nodes ?? []);
-    this.store.insertEdges(result.edges);
-    this.store.deleteUnresolvedRefsByIds(
-      result.resolvedRefs
-        .map((ref) => ref.id)
-        .filter((id): id is number => typeof id === 'number')
-    );
+    if (result.nodes && result.nodes.length > 0) {
+      this.store.insertNodes(result.nodes);
+    }
+
+    if (result.edges.length > 0) {
+      this.store.insertEdges(result.edges);
+    }
+
+    const resolvedIds = result.resolvedRefs
+      .map((ref) => ref.id)
+      .filter((id): id is number => typeof id === 'number');
+
+    if (resolvedIds.length > 0) {
+      this.store.deleteUnresolvedRefsByIds(resolvedIds);
+    }
+
     this.store.deleteOrphanExternalNodes();
+
+    // Report resolving phase complete
+    options.onProgress?.(1, 1, `Created ${result.edges.length} edges, ${result.nodes?.length || 0} external nodes`, 'resolving');
   }
 }
 

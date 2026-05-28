@@ -5,6 +5,7 @@
 import os from 'os';
 import { CodeAgentError } from './errors';
 import { Logger } from './logger';
+import { ProviderRequestError } from '../provider/types';
 
 /**
  * 错误报告
@@ -43,10 +44,37 @@ export class ErrorReporter {
   report(error: unknown, verbose: boolean = false): void {
     if (error instanceof CodeAgentError) {
       this.reportCodeAgentError(error, verbose);
+    } else if (error instanceof ProviderRequestError) {
+      this.reportProviderError(error, verbose);
     } else if (error instanceof Error) {
       this.reportGenericError(error, verbose);
     } else {
       this.reportUnknownError(error, verbose);
+    }
+  }
+
+  /**
+   * 报告 Provider 错误
+   */
+  private reportProviderError(error: ProviderRequestError, verbose: boolean): void {
+    this.logger.error(error.message);
+
+    console.error(`\nHTTP Status: ${error.status}`);
+
+    // 尝试解析 JSON 响应
+    try {
+      const body = JSON.parse(error.responseBody);
+      console.error('\nAPI Response:');
+      console.error(JSON.stringify(body, null, 2));
+    } catch {
+      // 如果不是 JSON，直接显示原始响应
+      console.error('\nAPI Response:');
+      console.error(error.responseBody);
+    }
+
+    if (verbose && error.stack) {
+      console.error('\nStack trace:');
+      console.error(error.stack);
     }
   }
 

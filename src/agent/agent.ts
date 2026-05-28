@@ -17,7 +17,7 @@ export interface AgentInfo {
   permission: AgentPermissionRuleset;
 }
 
-const DEFAULT_MAX_STEPS = 50;
+const DEFAULT_MAX_STEPS = 100; // 增加到 100 步，适应复杂任务
 
 const basePermissions: AgentPermissionRuleset = [
   permissionRule('*', 'ask'),
@@ -31,7 +31,7 @@ const basePermissions: AgentPermissionRuleset = [
   permissionRule('workspace.write', 'ask'),
   permissionRule('workspace.shell', 'ask'),
   permissionRule('todo.write', 'allow'),
-  permissionRule('task.run', 'ask'),
+  permissionRule('task.run', 'allow'),
   permissionRule('web.fetch', 'ask'),
   permissionRule('web.search', 'ask'),
   permissionRule('browser.navigate', 'ask'),
@@ -49,14 +49,18 @@ export const buildAgent: AgentInfo = {
   permission: mergeAgentPermissions(
     basePermissions,
     [
+      // 自动允许常见操作
       permissionRule('workspace.apply_patch', 'allow'),
-      permissionRule('workspace.edit', 'ask'),
-      permissionRule('workspace.write', 'ask'),
-      permissionRule('workspace.shell', 'ask'),
+      permissionRule('workspace.edit', 'allow'),
+      permissionRule('workspace.write', 'allow'),
+      permissionRule('workspace.shell', 'allow'),
+      // 仅拒绝危险命令
       permissionRule('workspace.shell', 'deny', 'rm *'),
       permissionRule('workspace.shell', 'deny', 'rm -rf *'),
       permissionRule('workspace.shell', 'deny', 'git reset --hard*'),
       permissionRule('workspace.shell', 'deny', 'git clean *'),
+      permissionRule('workspace.shell', 'deny', 'git push --force*'),
+      permissionRule('workspace.shell', 'deny', 'dd if=*'),
     ]
   ),
 };

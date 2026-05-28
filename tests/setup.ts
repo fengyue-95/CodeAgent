@@ -9,7 +9,11 @@ import path from 'path';
 import os from 'os';
 
 // 测试临时目录
-export const TEST_TMP_DIR = path.join(os.tmpdir(), 'code-agent-tests');
+export const TEST_TMP_DIR = path.join(
+  os.tmpdir(),
+  'code-agent-tests',
+  process.env.VITEST_WORKER_ID ?? 'main'
+);
 
 // 全局钩子
 beforeAll(() => {

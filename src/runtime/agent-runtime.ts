@@ -53,7 +53,7 @@ export type AgentRuntimeEvent =
   | { type: 'tool-result'; step: number; callId: string; tool: string; output: string }
   | { type: 'tool-error'; step: number; callId: string; tool: string; error: string }
   | { type: 'step-finish'; step: number; reason?: string }
-  | { type: 'runtime-error'; error: string };
+  | { type: 'runtime-error'; error: string; errorObject?: unknown };
 
 export interface AgentPermissionRequest {
   sessionId: string;
@@ -71,6 +71,7 @@ interface StreamToolCallState {
   id?: string;
   name?: string;
   arguments: string;
+  error?: string;
 }
 
 interface StreamStepResult {
@@ -80,8 +81,11 @@ interface StreamStepResult {
     id: string;
     name: string;
     arguments: string;
+    error?: string;
   }>;
 }
+
+const MAX_STREAMED_WRITE_ARGUMENT_CHARS = 16 * 1024;
 
 export class AgentRuntime {
   async run(input: AgentRuntimeInput): Promise<AgentRuntimeResult> {
@@ -149,7 +153,7 @@ export class AgentRuntime {
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        await this.emit(input, { type: 'runtime-error', error: message });
+        await this.emit(input, { type: 'runtime-error', error: message, errorObject: error });
         sessions.completeRun(run.id, 'failed', message);
         const failed = sessions.updateSessionStatus(session.id, 'failed') ?? session;
         return {
@@ -173,7 +177,7 @@ export class AgentRuntime {
     projectPath: string;
     runId: string;
   }): Promise<SessionMessage | undefined> {
-    const maxSteps = context.input.maxSteps ?? context.agent.maxSteps;
+    let maxSteps = context.input.maxSteps ?? context.agent.maxSteps;
     const registry = createLocalToolRegistry({
       projectRoot: context.projectPath,
       store: context.store,
@@ -184,6 +188,51 @@ export class AgentRuntime {
     let lastAssistant: SessionMessage | undefined;
 
     for (let step = 0; step < maxSteps; step += 1) {
+      // 检查是否接近步骤限制（剩余 5 步时警告）
+      if (step === maxSteps - 5 && maxSteps > 10) {
+        await this.emit(context.input, {
+          type: 'runtime-error',
+          error: `⚠️  接近步骤限制 (${step + 1}/${maxSteps})，任务可能需要继续...`,
+        });
+      }
+
+      // 达到步骤限制时询问是否继续
+      if (step === maxSteps - 1) {
+        await this.emit(context.input, {
+          type: 'runtime-error',
+          error: `⚠️  已达到步骤限制 (${maxSteps} 步)`,
+        });
+
+        // 如果有权限请求回调，询问用户是否继续
+        if (context.input.onPermissionRequest) {
+          const shouldContinue = await context.input.onPermissionRequest({
+            sessionId: context.session.id,
+            runId: context.runId,
+            permissionId: `continue-${step}`,
+            toolCallId: 'system',
+            tool: 'system',
+            permission: 'continue',
+            pattern: 'extend-steps',
+            input: { currentSteps: maxSteps, proposedExtension: 50 },
+          });
+
+          if (shouldContinue) {
+            maxSteps += 50; // 增加 50 步
+            await this.emit(context.input, {
+              type: 'runtime-error',
+              error: `✓ 继续执行，新的步骤限制: ${maxSteps}`,
+            });
+            // 继续循环
+          } else {
+            // 用户拒绝继续，结束循环
+            break;
+          }
+        } else {
+          // 没有回调，直接结束
+          break;
+        }
+      }
+
       context.sessions.incrementRunSteps(context.runId);
       const assistant = context.sessions.createMessage({
         sessionId: context.session.id,
@@ -227,6 +276,26 @@ export class AgentRuntime {
       }
 
       for (const call of toolCalls) {
+        if (call.error) {
+          processor.recordToolCall({ id: call.id, name: call.name, input: {} });
+          await this.emit(context.input, {
+            type: 'tool-call',
+            step: step + 1,
+            callId: call.id,
+            tool: call.name,
+            input: {},
+          });
+          processor.failToolCall({ callId: call.id, message: call.error });
+          await this.emit(context.input, {
+            type: 'tool-error',
+            step: step + 1,
+            callId: call.id,
+            tool: call.name,
+            error: call.error,
+          });
+          continue;
+        }
+
         let args: Record<string, unknown>;
         try {
           args = processor.parseToolArguments(call.arguments);
@@ -441,11 +510,31 @@ export class AgentRuntime {
         if (event.name) {
           state.name = event.name;
         }
-        if (event.arguments) {
+        if (event.arguments && !state.error) {
           state.arguments += event.arguments;
         }
+        if (
+          state.name === 'write' &&
+          state.arguments.length > MAX_STREAMED_WRITE_ARGUMENT_CHARS &&
+          !state.error
+        ) {
+          state.arguments = '';
+          state.error = [
+            `Tool argument payload for write is too large to stream safely (>${MAX_STREAMED_WRITE_ARGUMENT_CHARS} characters).`,
+            'Do not retry by sending a full large file body in one write call.',
+            'Create a minimal skeleton first, then fill the file using multiple focused edit calls or smaller patches.',
+          ].join(' ');
+        }
         toolCalls.set(event.index, state);
-        input.processor.recordToolCallDelta(event);
+        if (!state.error) {
+          input.processor.recordToolCallDelta(event);
+        } else if (state.id && state.name) {
+          input.processor.recordToolCall({
+            id: state.id,
+            name: state.name,
+            input: {},
+          });
+        }
 
         if (state.id && state.name && !announcedToolCalls.has(state.id)) {
           announcedToolCalls.add(state.id);
@@ -457,7 +546,7 @@ export class AgentRuntime {
           });
         }
 
-        if (event.arguments) {
+        if (event.arguments && !state.error) {
           await this.emit(input.context.input, {
             type: 'tool-call-delta',
             step: input.step,
@@ -491,6 +580,7 @@ export class AgentRuntime {
           id: item.id,
           name: item.name,
           arguments: item.arguments,
+          error: item.error,
         })),
     };
   }

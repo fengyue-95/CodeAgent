@@ -217,7 +217,7 @@ export function messageToProviderMessage(input: SessionMessageWithParts): Provid
     .join('\n');
   const toolCalls = input.message.role === 'assistant'
     ? input.parts
-      .filter((part): part is ToolSessionPart => part.type === 'tool' && part.status !== 'error')
+      .filter((part): part is ToolSessionPart => part.type === 'tool' && part.status !== 'pending')
       .map((part): ProviderToolCall => ({
         id: part.callId,
         type: 'function',

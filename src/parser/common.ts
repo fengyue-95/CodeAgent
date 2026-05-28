@@ -1,4 +1,6 @@
-import { Node as SyntaxNode } from 'web-tree-sitter';
+import Parser from 'web-tree-sitter';
+
+type SyntaxNode = Parser.SyntaxNode;
 
 export function getNodeText(source: string, node: SyntaxNode | null | undefined): string {
   if (!node) {

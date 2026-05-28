@@ -248,6 +248,14 @@ export class SessionProcessor {
         metadata: input.metadata,
       }));
     this.toolParts.set(input.callId, part);
+    this.input.sessions.createPart({
+      sessionId: this.input.sessionId,
+      messageId: this.input.message.id,
+      type: 'tool-result',
+      callId: input.callId,
+      output: input.message,
+      metadata: input.metadata,
+    });
     this.recordError(input.message, input.metadata);
     return part;
   }
@@ -298,12 +306,23 @@ export function parseToolArguments(value: string): Record<string, unknown> {
     return {};
   }
 
-  const parsed = JSON.parse(value) as unknown;
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('Tool arguments must be a JSON object');
-  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Tool arguments must be a JSON object');
+    }
 
-  return parsed as Record<string, unknown>;
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    // 提供更详细的错误信息
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const preview = value.length > 200 ? value.slice(0, 200) + '...' : value;
+    throw new Error(
+      `Failed to parse tool arguments: ${errorMessage}\n` +
+      `Arguments length: ${value.length} characters\n` +
+      `Preview: ${preview}`
+    );
+  }
 }
 
 function parsePartialToolArguments(value: string): Record<string, unknown> {

@@ -1,4 +1,4 @@
-import { Node as SyntaxNode } from 'web-tree-sitter';
+import Parser from 'web-tree-sitter';
 import { LanguageParser } from './index';
 import { getParser } from './grammars';
 import {
@@ -12,6 +12,8 @@ import {
 } from '../types';
 import { sha256 } from '../utils/hash';
 import { children, getChildByField, getNodeText, lastQualifiedSegment, namedChildren, normalizeWhitespace } from './common';
+
+type SyntaxNode = Parser.SyntaxNode;
 
 interface ContainerFrame {
   id: string;

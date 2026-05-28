@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
+import Parser from 'web-tree-sitter';
 import { Language } from '../types';
 
 const WASM_GRAMMARS: Partial<Record<Language, string>> = {
@@ -9,7 +9,7 @@ const WASM_GRAMMARS: Partial<Record<Language, string>> = {
   python: 'tree-sitter-python.wasm',
 };
 
-const languageCache = new Map<Language, WasmLanguage>();
+const languageCache = new Map<Language, Parser.Language>();
 const parserCache = new Map<Language, Parser>();
 
 let initialized = false;
@@ -36,7 +36,7 @@ export async function ensureGrammar(language: Language): Promise<void> {
   }
 
   const wasmPath = require.resolve(path.join('tree-sitter-wasms', 'out', wasmFile));
-  const wasmLanguage = await WasmLanguage.load(wasmPath);
+  const wasmLanguage = await Parser.Language.load(wasmPath);
   languageCache.set(language, wasmLanguage);
 }
 

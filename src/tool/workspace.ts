@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 
 const DEFAULT_LIMIT = 100;
 const DEFAULT_MAX_BYTES = 64 * 1024;
-const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_TIMEOUT_MS = 120_000; // 120 seconds for long-running commands like Maven searches
 
 export interface WorkspaceToolArgs {
   command?: unknown;

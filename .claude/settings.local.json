@@ -12,7 +12,22 @@
       "Bash(chmod +x:*)",
       "Bash(grep -E \"^-.*\\\\.md$|^d.*docs$|^d.*examples$\")",
       "Bash(ls tests/unit/*.test.ts tests/*.test.ts)",
-      "Bash(npx tsc:*)"
+      "Bash(npx tsc:*)",
+      "Bash(npm link:*)",
+      "Bash(sudo npm:*)",
+      "Bash(npm pack:*)",
+      "Bash(sudo chown:*)",
+      "Bash(find . -name \"*.py\" -type f -exec grep -l \"串行\\\\|并行\\\\|parallel\\\\|serial\" {} \\\\;)",
+      "Bash(npm list:*)",
+      "Bash(npm view:*)",
+      "Bash(code-agent run:*)",
+      "Bash(code-agent --help)",
+      "Bash(code-agent --verbose run \"test task\")",
+      "Bash(code-agent --log-file /tmp/code-agent.log run \"test\")",
+      "Bash(curl -s \"https://api.github.com/search/repositories?q=opencode+agent+steps\")",
+      "Bash(curl -s \"https://api.github.com/search/code?q=opencode+max+steps+language:typescript\")",
+      "Bash(code-agent --version)",
+      "Bash(node:*)"
     ]
   }
 }

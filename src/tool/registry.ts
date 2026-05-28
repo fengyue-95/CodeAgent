@@ -70,19 +70,18 @@ export type LocalSubTaskRunner = (input: LocalSubTaskInput) => Promise<unknown>;
 export function createLocalToolRegistry(input: LocalToolRegistryInput): ToolRegistry {
   const todos: TodoItem[] = [];
   const mode = input.mode ?? 'core';
-  const tools = mode === 'full'
-    ? [
-      ...createWorkspaceTools(input.projectRoot),
-      ...createFileEditTools(input.projectRoot),
-      ...createTodoTools(todos),
-      ...createTaskTools(input.runTask),
-      ...createWebTools(input.projectRoot),
-      ...createCodeGraphTools(input.store),
-    ]
-    : [
-      ...createCoreWorkspaceTools(input.projectRoot),
-      ...createCodeGraphTools(input.store),
-    ];
+
+  // 默认包含所有基础工具
+  const tools = [
+    ...createWorkspaceTools(input.projectRoot),
+    ...createFileEditTools(input.projectRoot),
+    ...createCodeGraphTools(input.store),
+    ...createTodoTools(todos),
+    ...createTaskTools(input.runTask),
+    // Web 工具可选，只在 full 模式下启用
+    ...(mode === 'full' ? createWebTools(input.projectRoot) : []),
+  ];
+
   const byName = new Map(tools.map((tool) => [tool.name, tool]));
 
   return {
@@ -188,7 +187,7 @@ export function createFileEditTools(projectRoot: string): LocalToolDefinition[] 
     {
       name: 'edit',
       permission: 'workspace.edit',
-      description: 'Replace text in an existing workspace file. Use a specific oldString; set replaceAll only when every occurrence should change.',
+      description: 'Replace text in an existing workspace file. PREFERRED tool for modifying files and adding content incrementally. Use a specific oldString; set replaceAll only when every occurrence should change. For large additions, use multiple edit operations instead of one large write.',
       parameters: objectSchema({
         filePath: stringProperty('Path to a file inside the project root.'),
         oldString: stringProperty('Exact text to replace.'),
@@ -201,10 +200,10 @@ export function createFileEditTools(projectRoot: string): LocalToolDefinition[] 
     {
       name: 'write',
       permission: 'workspace.write',
-      description: 'Write full content to a workspace file, creating parent directories when needed.',
+      description: 'Write full content to a workspace file, creating parent directories when needed. IMPORTANT: Use this ONLY for NEW files. For large files (>200 lines), write a minimal skeleton first, then use edit tool to add implementation incrementally. Each write operation should be under 300 lines to avoid JSON parsing errors.',
       parameters: objectSchema({
         filePath: stringProperty('Path to a file inside the project root.'),
-        content: stringProperty('Full file content to write.'),
+        content: stringProperty('Full file content to write. Keep under 300 lines when possible.'),
       }, ['filePath', 'content']),
       pattern: (args) => String(args.filePath ?? '*'),
       execute: (args) => writeFile(projectRoot, args as FileWriteArgs),

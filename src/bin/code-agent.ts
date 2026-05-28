@@ -788,7 +788,63 @@ async function runIndex(projectArg?: string, logger?: Logger): Promise<void> {
       logger.info('Starting index operation', { projectRoot: paths.root });
     }
     console.log(`Indexing project: ${paths.root}`);
-    await service.indexAll(paths.root);
+
+    let lastPercent = -1;
+    let currentPhase: 'parsing' | 'resolving' = 'parsing';
+    let spinnerInterval: NodeJS.Timeout | null = null;
+    let spinnerIndex = 0;
+    const spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let resolvingMessage = '';
+
+    await service.indexAll(paths.root, {
+      onProgress: (current, total, file, phase = 'parsing') => {
+        if (phase !== currentPhase) {
+          // Phase changed
+          if (currentPhase === 'parsing') {
+            process.stdout.write('\r' + ' '.repeat(120) + '\r');
+          }
+          currentPhase = phase;
+          lastPercent = -1;
+
+          if (phase === 'resolving' && !spinnerInterval) {
+            // Start spinner animation
+            resolvingMessage = file || 'Processing...';
+            spinnerInterval = setInterval(() => {
+              spinnerIndex = (spinnerIndex + 1) % spinner.length;
+              process.stdout.write(`\rResolving references: ${spinner[spinnerIndex]} ${resolvingMessage}`);
+            }, 80);
+          }
+        }
+
+        const percent = Math.floor((current / total) * 100);
+
+        if (phase === 'parsing') {
+          if (percent !== lastPercent) {
+            const bar = '█'.repeat(Math.floor(percent / 2)) + '░'.repeat(50 - Math.floor(percent / 2));
+            const fileInfo = file ? ` ${file.substring(0, 35)}...` : '';
+            process.stdout.write(`\rParsing files: [${bar}] ${percent}% (${current}/${total})${fileInfo}`);
+            lastPercent = percent;
+          }
+        } else if (phase === 'resolving') {
+          resolvingMessage = file || 'Processing...';
+          if (percent === 100) {
+            // Completed - stop spinner
+            if (spinnerInterval) {
+              clearInterval(spinnerInterval);
+              spinnerInterval = null;
+            }
+            process.stdout.write(`\rResolving references: ✓ ${file || 'Done'}` + ' '.repeat(40));
+          }
+        }
+      }
+    });
+
+    if (spinnerInterval) {
+      clearInterval(spinnerInterval);
+    }
+
+    process.stdout.write('\n'); // New line after progress
+
     const stats = store.getStats();
     console.log(`Indexed files: ${stats.fileCount}`);
     console.log(`Nodes: ${stats.nodeCount}`);
@@ -1014,7 +1070,47 @@ async function runSync(projectArg?: string, logger?: Logger): Promise<void> {
       logger.info('Starting sync operation', { projectRoot: paths.root });
     }
     console.log(`Syncing project: ${paths.root}`);
-    const result = await service.sync(paths.root);
+
+    let lastPercent = -1;
+    let currentPhase: 'parsing' | 'resolving' = 'parsing';
+
+    const result = await service.sync(paths.root, {
+      onProgress: (current, total, file, phase = 'parsing') => {
+        if (phase !== currentPhase) {
+          // Phase changed, clear line and show new phase
+          if (currentPhase === 'parsing') {
+            process.stdout.write('\r' + ' '.repeat(120) + '\r');
+          }
+          currentPhase = phase;
+          lastPercent = -1;
+        }
+
+        const percent = Math.floor((current / total) * 100);
+
+        if (phase === 'parsing') {
+          if (percent !== lastPercent) {
+            const bar = '█'.repeat(Math.floor(percent / 2)) + '░'.repeat(50 - Math.floor(percent / 2));
+            const fileInfo = file ? ` ${file.substring(0, 35)}...` : '';
+            process.stdout.write(`\rParsing files: [${bar}] ${percent}% (${current}/${total})${fileInfo}`);
+            lastPercent = percent;
+          }
+        } else {
+          // Resolving phase
+          if (percent === 0) {
+            // Starting
+            const spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            const spinnerIndex = Math.floor(Date.now() / 100) % spinner.length;
+            process.stdout.write(`\rResolving references: ${spinner[spinnerIndex]} ${file || 'Processing...'}`);
+          } else {
+            // Completed
+            process.stdout.write(`\rResolving references: ✓ ${file || 'Done'}` + ' '.repeat(40));
+          }
+        }
+      }
+    });
+
+    process.stdout.write('\n'); // New line after progress
+
     const stats = store.getStats();
     console.log(`Changed files: ${result.changedFiles} (added ${result.added}, modified ${result.modified}, deleted ${result.deleted})`);
     console.log(`Indexed files: ${stats.fileCount}`);
@@ -1253,13 +1349,14 @@ function printRunEvent(event: AgentRuntimeEvent): void {
 
   if (event.type === 'tool-call-start') {
     closeRunTextLine();
-    console.log(`[tool:${event.tool}] input`);
+    // 不显示 input，等待完整的 tool-call 事件
     return;
   }
 
   if (event.type === 'tool-call') {
     closeRunTextLine();
-    console.log(`[tool:${event.tool}] start ${formatToolInput(event.input)}`);
+    const toolInfo = formatToolInfo(event.tool, event.input);
+    console.log(`[tool:${event.tool}] ${toolInfo}`);
     return;
   }
 
@@ -1277,7 +1374,8 @@ function printRunEvent(event: AgentRuntimeEvent): void {
 
   if (event.type === 'tool-result') {
     closeRunTextLine();
-    console.log(`[tool:${event.tool}] done ${formatToolOutput(event.output)}`);
+    const summary = formatToolResultSummary(event.tool, event.output);
+    console.log(`[tool:${event.tool}] ${summary}`);
     return;
   }
 
@@ -1296,6 +1394,32 @@ function printRunEvent(event: AgentRuntimeEvent): void {
   if (event.type === 'runtime-error') {
     closeRunTextLine();
     console.log(`[error] ${event.error}`);
+
+    // 调试：显示 errorObject 的类型和属性
+    if (event.errorObject) {
+      console.log(`\n[debug] errorObject type: ${typeof event.errorObject}`);
+      console.log(`[debug] errorObject constructor: ${(event.errorObject as any).constructor?.name}`);
+      if (typeof event.errorObject === 'object' && event.errorObject !== null) {
+        console.log(`[debug] has status: ${'status' in event.errorObject}`);
+        console.log(`[debug] has responseBody: ${'responseBody' in event.errorObject}`);
+      }
+    }
+
+    // 如果是 ProviderRequestError，显示详细信息
+    if (event.errorObject && typeof event.errorObject === 'object' && event.errorObject !== null && 'status' in event.errorObject && 'responseBody' in event.errorObject) {
+      const providerError = event.errorObject as { status: number; responseBody: string };
+      console.log(`\nHTTP Status: ${providerError.status}`);
+      console.log('\nAPI Response:');
+
+      // 尝试格式化 JSON 响应
+      try {
+        const body = JSON.parse(providerError.responseBody);
+        console.log(JSON.stringify(body, null, 2));
+      } catch {
+        // 如果不是 JSON，直接显示原始响应
+        console.log(providerError.responseBody);
+      }
+    }
   }
 }
 
@@ -1332,6 +1456,38 @@ function formatToolInput(input: Record<string, unknown>): string {
   return json ? truncateText(json, 300) : '{}';
 }
 
+function formatToolInfo(tool: string, input: Record<string, unknown>): string {
+  // 针对不同工具显示关键信息
+  if (tool === 'read' && input.filePath) {
+    return `reading ${input.filePath}`;
+  }
+  if (tool === 'write' && input.filePath) {
+    return `writing ${input.filePath}`;
+  }
+  if (tool === 'edit' && input.filePath) {
+    return `editing ${input.filePath}`;
+  }
+  if (tool === 'shell' && input.command) {
+    const cmd = String(input.command);
+    return `executing: ${truncateText(cmd, 80)}`;
+  }
+  if (tool === 'glob' && input.pattern) {
+    return `searching files: ${input.pattern}`;
+  }
+  if (tool === 'grep' && input.pattern) {
+    return `searching content: ${input.pattern}`;
+  }
+  if (tool === 'gitDiff') {
+    return 'checking git diff';
+  }
+  if (tool === 'applyPatch') {
+    return 'applying patch';
+  }
+
+  // 默认显示完整输入
+  return formatToolInput(input);
+}
+
 function formatToolOutput(output: string): string {
   const trimmed = output.trim();
   if (!trimmed) {
@@ -1339,6 +1495,51 @@ function formatToolOutput(output: string): string {
   }
 
   return truncateText(trimmed.replace(/\s+/g, ' '), 500);
+}
+
+function formatToolResultSummary(tool: string, output: string): string {
+  const trimmed = output.trim();
+
+  // 针对不同工具显示摘要
+  if (tool === 'read') {
+    const lines = trimmed.split('\n').length;
+    const bytes = trimmed.length;
+    return `✓ read ${lines} lines (${bytes} bytes)`;
+  }
+  if (tool === 'write') {
+    return '✓ file written';
+  }
+  if (tool === 'edit') {
+    return '✓ file edited';
+  }
+  if (tool === 'shell') {
+    const lines = trimmed.split('\n').length;
+    if (lines > 5) {
+      return `✓ executed (${lines} lines output)`;
+    }
+    return `✓ ${truncateText(trimmed, 100)}`;
+  }
+  if (tool === 'glob') {
+    const files = trimmed.split('\n').filter(Boolean).length;
+    return `✓ found ${files} files`;
+  }
+  if (tool === 'grep') {
+    const matches = trimmed.split('\n').filter(Boolean).length;
+    return `✓ found ${matches} matches`;
+  }
+  if (tool === 'gitDiff') {
+    const lines = trimmed.split('\n').length;
+    return `✓ diff (${lines} lines)`;
+  }
+  if (tool === 'applyPatch') {
+    return '✓ patch applied';
+  }
+
+  // 默认显示截断的输出
+  if (!trimmed) {
+    return '✓ done';
+  }
+  return `✓ ${formatToolOutput(output)}`;
 }
 
 function truncateText(value: string, maxLength: number): string {
