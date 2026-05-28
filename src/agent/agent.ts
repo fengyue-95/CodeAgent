@@ -66,7 +66,7 @@ export const planAgent: AgentInfo = {
   mode: 'primary',
   description: 'Read-only planning agent. Can inspect code and build an implementation plan, but cannot edit.',
   systemPrompt: PLAN_SYSTEM_PROMPT,
-  maxSteps: 12,
+  maxSteps: DEFAULT_MAX_STEPS,
   permission: mergeAgentPermissions(
     basePermissions,
     [

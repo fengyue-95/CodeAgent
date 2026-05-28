@@ -21,6 +21,7 @@ import { AgentName } from '../agent';
 import { AgentPermissionRequest, AgentRuntime, AgentRuntimeEvent, AgentRuntimeResult } from '../runtime';
 import { createDeepSeekProvider } from '../provider';
 import { closeBrowserSession } from '../tool';
+import { SessionInfo } from '../session';
 
 type Command =
   | 'run'
@@ -28,6 +29,8 @@ type Command =
   | 'sync'
   | 'watch'
   | 'git'
+  | 'session'
+  | 'sessions'
   | 'stats'
   | 'unresolved'
   | 'search'
@@ -45,6 +48,8 @@ const commands: Command[] = [
   'sync',
   'watch',
   'git',
+  'session',
+  'sessions',
   'stats',
   'unresolved',
   'search',
@@ -68,6 +73,8 @@ function usage(): string {
     '  watch [options] [projectPath]    Watch files and auto-sync changed source files',
     '  git sync [projectPath]           Run git-based sync',
     '  git hook <action> [projectPath]  Manage git hooks; action: install, remove, status',
+    '  session list [projectPath]       List agent sessions for a project',
+    '  session new [projectPath]        Create a session manually',
     '  stats [projectPath]              Show local index statistics',
     '  unresolved [options] [projectPath] Show unresolved reference summary',
     '  search <query> [projectPath]     Search symbols by name',
@@ -82,9 +89,15 @@ function usage(): string {
     'Run options:',
     '  --agent <build|plan>             Agent to use; default: build',
     '  --model <model>                  Provider model override',
-    '  --max-steps <n>                  Maximum agent loop steps',
+    '  --max-steps <n>                  Maximum agent loop steps; default: 25',
     '  --temperature <n>                Sampling temperature',
+    '  --session <sessionId>            Continue an existing session',
+    '  --continue                       Continue the latest session in the project',
     '  --cwd, --project <projectPath>   Project root override',
+    '',
+    'Session options:',
+    '  --title <title>                  Title for session new',
+    '  --limit <n>                      Number of sessions to list; default: 20',
     '',
     'Watch options:',
     '  --verbose, -v                    Print changed nodes and edges',
@@ -107,6 +120,14 @@ function usage(): string {
     '      Run the default build agent against the current project.',
     '  code-agent run "plan a session resume feature" --agent plan --max-steps 6',
     '      Use the read-only planning agent with a step limit.',
+    '  code-agent run "inspect gift card design" --max-steps 25',
+    '      Override the maximum agent loop steps for this run.',
+    '  code-agent session new --title "gift card investigation"',
+    '      Create a session before running a series of related prompts.',
+    '  code-agent run "continue the investigation" --continue',
+    '      Continue the latest session instead of creating a new one.',
+    '  code-agent run "check edge cases" --session ses_xxx',
+    '      Continue a specific session.',
     '  code-agent search SessionProcessor',
     '      Search indexed symbols matching SessionProcessor.',
     '  code-agent node GraphQueryService',
@@ -139,6 +160,8 @@ interface RunArgs {
   model?: string;
   maxSteps?: number;
   temperature?: number;
+  sessionId?: string;
+  continueLatest?: boolean;
 }
 
 async function createIndexService(dbPath: string): Promise<{
@@ -327,6 +350,8 @@ function parseRunArgs(args: string[]): RunArgs {
   let model: string | undefined;
   let maxSteps: number | undefined;
   let temperature: number | undefined;
+  let sessionId: string | undefined;
+  let continueLatest = false;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -381,6 +406,26 @@ function parseRunArgs(args: string[]): RunArgs {
       continue;
     }
 
+    if (arg === '--session') {
+      const value = args[index + 1];
+      if (!value) {
+        throw new Error('Missing value for --session');
+      }
+      sessionId = value;
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith('--session=')) {
+      sessionId = arg.slice('--session='.length);
+      continue;
+    }
+
+    if (arg === '--continue') {
+      continueLatest = true;
+      continue;
+    }
+
     if (arg === '--cwd' || arg === '--project') {
       projectArg = args[index + 1];
       if (!projectArg) {
@@ -421,7 +466,11 @@ function parseRunArgs(args: string[]): RunArgs {
     throw new Error('Missing task. Usage: code-agent run "<task>" [projectPath]');
   }
 
-  return { task, projectArg, agent, model, maxSteps, temperature };
+  if (sessionId && continueLatest) {
+    throw new Error('Use either --session or --continue, not both.');
+  }
+
+  return { task, projectArg, agent, model, maxSteps, temperature, sessionId, continueLatest };
 }
 
 function parseAgentName(value: string | undefined): AgentName {
@@ -430,6 +479,25 @@ function parseAgentName(value: string | undefined): AgentName {
   }
 
   throw new Error(`Invalid agent: ${value ?? ''}. Expected "build" or "plan".`);
+}
+
+function parseProjectFlag(arg: string, next: string | undefined): { consumed: boolean; value?: string } | undefined {
+  if (arg === '--cwd' || arg === '--project') {
+    if (!next) {
+      throw new Error(`Missing value for ${arg}`);
+    }
+    return { consumed: true, value: next };
+  }
+
+  if (arg.startsWith('--cwd=')) {
+    return { consumed: false, value: arg.slice('--cwd='.length) };
+  }
+
+  if (arg.startsWith('--project=')) {
+    return { consumed: false, value: arg.slice('--project='.length) };
+  }
+
+  return undefined;
 }
 
 function isCommand(value: string): value is Command {
@@ -628,6 +696,10 @@ async function runAgentTask(args: string[]): Promise<void> {
   console.log(`Project: ${paths.root}`);
   console.log(`Agent: ${options.agent ?? 'build'}`);
   console.log(`Model: ${options.model ?? provider.defaultModel}`);
+  const sessionId = options.sessionId ?? (options.continueLatest ? resolveLatestSessionId(paths.dbPath) : undefined);
+  if (sessionId) {
+    console.log(`Session: ${sessionId}`);
+  }
   console.log('');
 
   try {
@@ -635,6 +707,7 @@ async function runAgentTask(args: string[]): Promise<void> {
       task: options.task,
       projectPath: paths.root,
       provider,
+      sessionId,
       agent: options.agent,
       model: options.model,
       maxSteps: options.maxSteps,
@@ -651,6 +724,153 @@ async function runAgentTask(args: string[]): Promise<void> {
   } finally {
     await closeBrowserSession();
   }
+}
+
+function resolveLatestSessionId(dbPath: string): string {
+  ensureStateDir(path.dirname(dbPath));
+  const store = createStore(dbPath);
+  try {
+    const session = store.sessions().listSessions(1)[0];
+    if (!session) {
+      throw new Error('No existing sessions. Run `code-agent session new` first or omit --continue.');
+    }
+    return session.id;
+  } finally {
+    store.close();
+  }
+}
+
+function runSessionCommand(args: string[]): void {
+  const actionArg = args[0];
+  const action = actionArg === 'new' || actionArg === 'list' ? actionArg : 'list';
+  const rest = action === 'list' && actionArg !== 'list' && actionArg !== 'new' ? args : args.slice(1);
+  const options = parseSessionArgs(rest);
+  const paths = resolveProjectPaths(options.projectArg);
+  ensureStateDir(paths.stateDir);
+  const store = createStore(paths.dbPath);
+  try {
+    if (action === 'new') {
+      const session = store.sessions().createSession({
+        cwd: paths.root,
+        agent: options.agent ?? 'build',
+        model: options.model,
+        title: options.title,
+      });
+      printSession(session);
+      return;
+    }
+
+    const sessions = store.sessions().listSessions(options.limit);
+    if (sessions.length === 0) {
+      console.log('No sessions.');
+      return;
+    }
+
+    for (const session of sessions) {
+      printSession(session);
+      console.log('');
+    }
+  } finally {
+    store.close();
+  }
+}
+
+function parseSessionArgs(args: string[]): {
+  projectArg?: string;
+  title?: string;
+  agent?: AgentName;
+  model?: string;
+  limit: number;
+} {
+  let projectArg: string | undefined;
+  let title: string | undefined;
+  let agent: AgentName | undefined;
+  let model: string | undefined;
+  let limit = 20;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (!arg) {
+      continue;
+    }
+
+    const projectFlag = parseProjectFlag(arg, args[index + 1]);
+    if (projectFlag) {
+      projectArg = projectFlag.value;
+      if (projectFlag.consumed) {
+        index += 1;
+      }
+      continue;
+    }
+
+    if (arg === '--title') {
+      title = args[index + 1];
+      if (!title) {
+        throw new Error('Missing value for --title');
+      }
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith('--title=')) {
+      title = arg.slice('--title='.length);
+      continue;
+    }
+
+    if (arg === '--agent') {
+      agent = parseAgentName(args[index + 1]);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith('--agent=')) {
+      agent = parseAgentName(arg.slice('--agent='.length));
+      continue;
+    }
+
+    if (arg === '--model') {
+      model = args[index + 1];
+      if (!model) {
+        throw new Error('Missing value for --model');
+      }
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith('--model=')) {
+      model = arg.slice('--model='.length);
+      continue;
+    }
+
+    if (arg === '--limit') {
+      limit = parseLimit(args[index + 1]);
+      index += 1;
+      continue;
+    }
+
+    if (arg.startsWith('--limit=')) {
+      limit = parseLimit(arg.slice('--limit='.length));
+      continue;
+    }
+
+    if (arg.startsWith('--')) {
+      throw new Error(`Unknown session option: ${arg}`);
+    }
+
+    projectArg = arg;
+  }
+
+  return { projectArg, title, agent, model, limit };
+}
+
+function printSession(session: SessionInfo): void {
+  console.log(`id: ${session.id}`);
+  console.log(`title: ${session.title}`);
+  console.log(`cwd: ${session.cwd}`);
+  console.log(`agent: ${session.agent}`);
+  console.log(`model: ${session.model ?? 'n/a'}`);
+  console.log(`status: ${session.status}`);
+  console.log(`updated: ${formatTimestamp(session.updatedAt)}`);
 }
 
 async function runSync(projectArg?: string): Promise<void> {
@@ -1202,7 +1422,20 @@ async function main(): Promise<void> {
   const command = rawCommand;
 
   if (command === 'run') {
+    if (restArgs.includes('--help') || restArgs.includes('-h')) {
+      console.log(usage());
+      return;
+    }
     await runAgentTask(restArgs);
+    return;
+  }
+
+  if (command === 'session' || command === 'sessions') {
+    if (restArgs.includes('--help') || restArgs.includes('-h')) {
+      console.log(usage());
+      return;
+    }
+    runSessionCommand(restArgs);
     return;
   }
 

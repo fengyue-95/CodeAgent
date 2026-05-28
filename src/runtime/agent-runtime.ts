@@ -20,6 +20,7 @@ export interface AgentRuntimeInput {
   task: string;
   projectPath: string;
   provider: ProviderClient;
+  sessionId?: string;
   agent?: AgentName | string;
   model?: string;
   title?: string;
@@ -92,12 +93,17 @@ export class AgentRuntime {
     const store = createStore(paths.dbPath);
     try {
       const sessions = store.sessions();
-      const session = sessions.createSession({
-        cwd: paths.root,
-        agent: agent.name,
-        model: input.model ?? input.provider.defaultModel,
-        title: input.title,
-      });
+      const session = input.sessionId
+        ? sessions.getSession(input.sessionId)
+        : sessions.createSession({
+          cwd: paths.root,
+          agent: agent.name,
+          model: input.model ?? input.provider.defaultModel,
+          title: input.title,
+        });
+      if (!session) {
+        throw new Error(`Session not found: ${input.sessionId}`);
+      }
       sessions.updateSessionStatus(session.id, 'running');
 
       const userMessage = sessions.createMessage({
@@ -115,6 +121,7 @@ export class AgentRuntime {
 
       const run = sessions.createRun({
         sessionId: session.id,
+        messageId: userMessage.id,
         agent: agent.name,
         model: input.model ?? input.provider.defaultModel,
       });
