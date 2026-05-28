@@ -9,7 +9,7 @@
     "code-agent": "dist/bin/code-agent.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-schema.js && node scripts/chmod-bin.js",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-schema.js && node scripts/chmod-bin.js",
     "check": "tsc --noEmit -p tsconfig.json",
     "cli": "npm run build && node dist/bin/code-agent.js",
     "test": "vitest run",

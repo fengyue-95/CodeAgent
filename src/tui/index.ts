@@ -10,6 +10,17 @@ import { createStore, ensureStateDir, resolveProjectPaths } from '../project';
 import { AgentPermissionRequest, AgentRuntime, AgentRuntimeEvent } from '../runtime';
 import { SessionInfo, SessionMessageWithParts } from '../session';
 import { LocalToolMode, closeBrowserSession } from '../tool';
+import {
+  completeFileReferenceLine,
+  formatFileSuggestionRows,
+  moveFileReferenceSelection,
+  parseProjectFilesOutput,
+  prepareSelectedFileReferenceInput,
+  projectFilesCommand,
+  scoreFiles,
+  suggestFileReferences,
+} from '../utils/file-references';
+import { parseTaskToolOutput } from '../utils/tool-output';
 
 interface TuiOptions {
   projectArg?: string;
@@ -30,6 +41,15 @@ interface TuiState {
   toolMode: LocalToolMode;
   showDetails: boolean;
   undone?: UndonePrompt;
+  fileReferenceFiles?: string[];
+  liveFileSuggestionSignature?: string;
+  liveFileSuggestionVisible?: boolean;
+  liveFileSuggestions?: string[];
+  liveFileSuggestionQuery?: string;
+  liveFileSuggestionSelectedIndex?: number;
+  liveFileSuggestionRowCount?: number;
+  pendingInputLine?: string;
+  skipNextSubmittedLine?: boolean;
 }
 
 interface UndonePrompt {
@@ -117,17 +137,27 @@ export async function startTui(args: string[] = []): Promise<void> {
     completer: (line: string) => completeInput(paths.root, line),
   });
 
-  installTabAgentSwitcher(rl, state);
+  const uninstallInputKeyHandlers = installInputKeyHandlers(rl, state);
   printBanner(state);
 
   try {
     while (true) {
-      const line = (await rl.question(promptLabel(state))).trim();
+      const line = (await questionWithPrefill(rl, promptLabel(state), state.pendingInputLine)).trim();
+      state.pendingInputLine = undefined;
+      if (state.skipNextSubmittedLine) {
+        state.skipNextSubmittedLine = false;
+        if (line) {
+          state.pendingInputLine = line;
+        }
+        continue;
+      }
+
       if (!line) {
         continue;
       }
 
       if (line.startsWith('/')) {
+        clearLiveFileSuggestions(state, rl);
         const shouldExit = await handleSlashCommand(line, state, rl);
         if (shouldExit) {
           break;
@@ -138,9 +168,11 @@ export async function startTui(args: string[] = []): Promise<void> {
       const prompt = line.startsWith('!')
         ? await shellPrompt(state.projectRoot, line.slice(1).trim())
         : await expandFileReferences(state.projectRoot, line, rl);
+      clearLiveFileSuggestions(state, rl);
       await runPrompt(prompt, state, rl);
     }
   } finally {
+    uninstallInputKeyHandlers();
     rl.close();
     await closeBrowserSession();
   }
@@ -424,6 +456,22 @@ function printTuiEvent(event: AgentRuntimeEvent, state: TuiState): void {
 
   if (event.type === 'tool-result') {
     closeTextLine();
+    if (event.tool === 'task') {
+      const task = parseTaskToolOutput(event.output);
+      const meta = task
+        ? [
+          task.status ?? 'completed',
+          typeof task.steps === 'number' ? `${task.steps} step(s)` : undefined,
+        ].filter(Boolean).join('; ')
+        : 'done';
+      console.log(`${badge('tool', 'green')} ${event.tool} ${dim(meta)}`);
+      const output = task?.output?.trim();
+      if (output) {
+        console.log(output);
+      }
+      return;
+    }
+
     const suffix = state.showDetails ? ` ${truncate(event.output.replace(/\s+/g, ' '), 700)}` : '';
     console.log(`${badge('tool', 'green')} ${event.tool} ${dim('done')}${suffix}`);
     return;
@@ -719,16 +767,8 @@ async function resolveFileReference(projectRoot: string, query: string): Promise
 }
 
 async function searchFileReferences(projectRoot: string, query: string, limit: number): Promise<string[]> {
-  const files = await listProjectFiles(projectRoot, 3000);
-  return scoreFiles(files, query).slice(0, limit);
-}
-
-function scoreFiles(files: string[], query: string): string[] {
-  return files
-    .map((file) => ({ file, score: fuzzyScore(file, query) }))
-    .filter((item) => item.score > 0)
-    .sort((left, right) => right.score - left.score || left.file.length - right.file.length)
-    .map((item) => item.file);
+  const files = await listProjectFiles(projectRoot);
+  return scoreFiles(files, query, limit);
 }
 
 function completeInput(projectRoot: string, line: string): [string[], string] {
@@ -757,13 +797,8 @@ function completeInput(projectRoot: string, line: string): [string[], string] {
     return [[], line];
   }
 
-  const prefix = at[1] ?? '';
   try {
-    const query = prefix.startsWith('file:') ? prefix.slice('file:'.length) : prefix;
-    const files = scoreFiles(listProjectFilesSync(projectRoot, 300), query)
-      .slice(0, 30)
-      .map((file) => line.slice(0, line.length - prefix.length) + (prefix.startsWith('file:') ? `file:${file}` : file));
-    return [files, line];
+    return [completeFileReferenceLine(line, listProjectFilesSync(projectRoot), 30), line];
   } catch {
     return [[], line];
   }
@@ -814,22 +849,213 @@ function runShell(cwd: string, command: string): Promise<{ exitCode: number; std
   });
 }
 
-function installTabAgentSwitcher(rl: Interface, state: TuiState): void {
+function installInputKeyHandlers(rl: Interface, state: TuiState): () => void {
   readline.emitKeypressEvents(process.stdin, rl);
-  if (process.stdin.isTTY) {
-    process.stdin.on('keypress', (_text, key) => {
-      if (key?.name !== 'tab' || rl.line.trim().length > 0) {
-        return;
-      }
-      cycleAgent(state);
-      console.log(`\n${badge('agent', 'cyan')} ${state.agent}`);
-      rl.prompt();
-    });
+  if (!process.stdin.isTTY) {
+    return () => {};
   }
+
+  const previousRawMode = process.stdin.isRaw;
+  process.stdin.setRawMode(true);
+
+  const onKeypress = (_text: string | undefined, key: readline.Key | undefined): void => {
+    if (key?.ctrl && key.name === 'c') {
+      clearLiveFileSuggestions(state, rl);
+      process.stdin.setRawMode(previousRawMode);
+      console.log('');
+      process.kill(process.pid, 'SIGINT');
+      return;
+    }
+
+    if (key?.name === 'return' && acceptLiveFileSuggestion(rl, state, false)) {
+      return;
+    }
+
+    if (key?.name === 'tab' && acceptLiveFileSuggestion(rl, state, true)) {
+      return;
+    }
+
+    if (key?.name === 'return') {
+      clearLiveFileSuggestions(state, rl);
+      return;
+    }
+
+    if (key?.name === 'tab') {
+      if (rl.line.trim().length === 0) {
+        clearLiveFileSuggestions(state, rl);
+        cycleAgent(state);
+        console.log(`\n${badge('agent', 'cyan')} ${state.agent}`);
+        rl.prompt();
+      }
+      return;
+    }
+
+    if (key?.name === 'up' && moveLiveFileSuggestionSelection(state, -1)) {
+      renderLiveFileSuggestions(rl, state, { force: true });
+      return;
+    }
+
+    if (key?.name === 'down' && moveLiveFileSuggestionSelection(state, 1)) {
+      renderLiveFileSuggestions(rl, state, { force: true });
+      return;
+    }
+
+    setImmediate(() => renderLiveFileSuggestions(rl, state));
+  };
+
+  process.stdin.on('keypress', onKeypress);
+
+  return () => {
+    process.stdin.off('keypress', onKeypress);
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(previousRawMode);
+    }
+  };
 }
 
 function cycleAgent(state: TuiState): void {
   state.agent = state.agent === 'build' ? 'plan' : 'build';
+}
+
+function renderLiveFileSuggestions(rl: Interface, state: TuiState, options: { force?: boolean } = {}): void {
+  if (!process.stdout.isTTY) {
+    return;
+  }
+
+  const result = suggestFileReferences(rl.line, getCachedProjectFiles(state), 8);
+  if (!result) {
+    clearLiveFileSuggestions(state, rl);
+    state.liveFileSuggestionSignature = undefined;
+    state.liveFileSuggestions = undefined;
+    state.liveFileSuggestionQuery = undefined;
+    state.liveFileSuggestionSelectedIndex = undefined;
+    return;
+  }
+
+  const previousQuery = state.liveFileSuggestionQuery;
+  state.liveFileSuggestions = result.suggestions;
+  state.liveFileSuggestionQuery = result.query;
+  if (previousQuery !== result.query || state.liveFileSuggestionSelectedIndex === undefined) {
+    state.liveFileSuggestionSelectedIndex = 0;
+  }
+  if (result.suggestions.length > 0) {
+    state.liveFileSuggestionSelectedIndex = Math.min(state.liveFileSuggestionSelectedIndex, result.suggestions.length - 1);
+  }
+
+  const signature = `${result.query}\u0000${result.suggestions.join('\u0000')}`;
+  if (!options.force && signature === state.liveFileSuggestionSignature) {
+    return;
+  }
+  state.liveFileSuggestionSignature = signature;
+
+  const rows = formatFileSuggestionRows(
+    result.query,
+    result.suggestions,
+    state.liveFileSuggestionSelectedIndex ?? 0,
+    terminalWidth() - 1,
+    8
+  ).map((row, index) => index === 0 ? dim(row) : row);
+  drawLiveFileSuggestions(rl, state, rows);
+}
+
+function moveLiveFileSuggestionSelection(state: TuiState, delta: number): boolean {
+  const suggestions = state.liveFileSuggestions ?? [];
+  if (!state.liveFileSuggestionVisible || suggestions.length === 0) {
+    return false;
+  }
+
+  state.liveFileSuggestionSelectedIndex = moveFileReferenceSelection(
+    state.liveFileSuggestionSelectedIndex ?? 0,
+    delta,
+    suggestions.length
+  );
+  return true;
+}
+
+function acceptLiveFileSuggestion(rl: Interface, state: TuiState, shouldSubmit: boolean): boolean {
+  const suggestions = state.liveFileSuggestions ?? [];
+  if (!state.liveFileSuggestionVisible || suggestions.length === 0) {
+    return false;
+  }
+
+  const selected = suggestions[state.liveFileSuggestionSelectedIndex ?? 0];
+  if (!selected) {
+    return false;
+  }
+
+  const nextInput = prepareSelectedFileReferenceInput(rl.line, selected, shouldSubmit);
+  rl.write('', { ctrl: true, name: 'u' });
+  rl.write(nextInput.line);
+  if (!nextInput.shouldSubmit) {
+    state.pendingInputLine = nextInput.line;
+    state.skipNextSubmittedLine = true;
+  }
+  clearLiveFileSuggestions(state, rl);
+  return true;
+}
+
+function questionWithPrefill(rl: Interface, query: string, prefill: string | undefined): Promise<string> {
+  const answer = rl.question(query);
+  if (prefill) {
+    setImmediate(() => rl.write(prefill));
+  }
+  return answer;
+}
+
+function getCachedProjectFiles(state: TuiState): string[] {
+  state.fileReferenceFiles ??= listProjectFilesSync(state.projectRoot);
+  return state.fileReferenceFiles;
+}
+
+function drawLiveFileSuggestions(rl: Interface, state: TuiState, rows: string[]): void {
+  clearRenderedLiveFileSuggestionLine(rl, state);
+  for (const row of rows) {
+    process.stdout.write('\n');
+    readline.cursorTo(process.stdout, 0);
+    readline.clearLine(process.stdout, 0);
+    process.stdout.write(row);
+  }
+  readline.cursorTo(process.stdout, 0);
+  readline.moveCursor(process.stdout, 0, -rows.length);
+  refreshReadlineLine(rl);
+  state.liveFileSuggestionVisible = true;
+  state.liveFileSuggestionRowCount = rows.length;
+}
+
+function clearLiveFileSuggestions(state: TuiState, rl?: Interface): void {
+  clearRenderedLiveFileSuggestionLine(rl, state);
+  state.liveFileSuggestionSignature = undefined;
+  state.liveFileSuggestions = undefined;
+  state.liveFileSuggestionQuery = undefined;
+  state.liveFileSuggestionSelectedIndex = undefined;
+  state.liveFileSuggestionRowCount = undefined;
+}
+
+function clearRenderedLiveFileSuggestionLine(rl: Interface | undefined, state: TuiState): void {
+  if (!state.liveFileSuggestionVisible || !process.stdout.isTTY) {
+    return;
+  }
+
+  const rowCount = state.liveFileSuggestionRowCount ?? 1;
+  for (let index = 0; index < rowCount; index += 1) {
+    process.stdout.write('\n');
+    readline.cursorTo(process.stdout, 0);
+    readline.clearLine(process.stdout, 0);
+  }
+  readline.cursorTo(process.stdout, 0);
+  readline.moveCursor(process.stdout, 0, -rowCount);
+  if (rl) {
+    refreshReadlineLine(rl);
+  }
+  state.liveFileSuggestionVisible = false;
+  state.liveFileSuggestionRowCount = undefined;
+}
+
+function refreshReadlineLine(rl: Interface): void {
+  const refresh = (rl as unknown as { _refreshLine?: () => void })._refreshLine;
+  if (refresh) {
+    refresh.call(rl);
+  }
 }
 
 function printBanner(state: TuiState): void {
@@ -880,47 +1106,23 @@ function requireValue(value: string | undefined, name: string): string {
   return value;
 }
 
-async function listProjectFiles(projectRoot: string, limit: number): Promise<string[]> {
-  const result = await runShell(projectRoot, `rg --files -g '!/.code-agent/**' | head -n ${limit}`);
-  return result.stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+async function listProjectFiles(projectRoot: string): Promise<string[]> {
+  const result = await runShell(projectRoot, projectFilesCommand());
+  return parseProjectFilesOutput(result.stdout);
 }
 
-function listProjectFilesSync(projectRoot: string, limit: number): string[] {
-  const result = spawnSyncText(projectRoot, `rg --files -g '!/.code-agent/**' | head -n ${limit}`);
-  return result.split('\n').map((line) => line.trim()).filter(Boolean);
+function listProjectFilesSync(projectRoot: string): string[] {
+  const result = spawnSyncText(projectRoot, projectFilesCommand());
+  return parseProjectFilesOutput(result);
 }
 
 function spawnSyncText(cwd: string, command: string): string {
   const child = spawnSync('/bin/sh', ['-lc', command], {
     cwd,
     encoding: 'utf8',
-    maxBuffer: 128 * 1024,
+    maxBuffer: 8 * 1024 * 1024,
   });
   return child.stdout ?? '';
-}
-
-function fuzzyScore(value: string, query: string): number {
-  if (!query) {
-    return 1;
-  }
-
-  const lowerValue = value.toLowerCase();
-  const lowerQuery = query.toLowerCase();
-  if (lowerValue.includes(lowerQuery)) {
-    return 1000 - lowerValue.indexOf(lowerQuery);
-  }
-
-  let score = 0;
-  let valueIndex = 0;
-  for (const char of lowerQuery) {
-    const found = lowerValue.indexOf(char, valueIndex);
-    if (found < 0) {
-      return 0;
-    }
-    score += Math.max(1, 20 - (found - valueIndex));
-    valueIndex = found + 1;
-  }
-  return score;
 }
 
 async function readTextFileLimited(filePath: string, maxBytes: number): Promise<string> {

@@ -8,6 +8,7 @@ import { SqliteGraphStore } from '../store/queries';
 import { CodeIndexService, SyncResult } from '../service/indexer';
 import { CodeEdge, CodeNode } from '../types';
 import { GraphContextResult, GraphQueryService, RelatedNode } from '../graph';
+import { GraphAnalysisService } from '../graph/analysis';
 import { startMcpServer } from '../mcp/server';
 import { createDefaultIndexService } from '../service/default-service';
 import {
@@ -25,6 +26,7 @@ import { SessionInfo } from '../session';
 import { startTui } from '../tui';
 import { Logger, LogLevel } from '../utils/logger';
 import { ErrorReporter } from '../utils/error-reporter';
+import { formatTaskToolResultForConsole } from '../utils/tool-output';
 import { configureLogger, GlobalOptions, setupErrorHandlers } from '../utils/cli-helpers';
 import { CodeAgentError, ErrorCode, ErrorHandler } from '../utils/errors';
 import { parseGlobalOptions, stripGlobalOptions } from './parse-global-options';
@@ -40,6 +42,7 @@ type Command =
   | 'sessions'
   | 'stats'
   | 'unresolved'
+  | 'analyze'
   | 'search'
   | 'node'
   | 'context'
@@ -60,6 +63,7 @@ const commands: Command[] = [
   'sessions',
   'stats',
   'unresolved',
+  'analyze',
   'search',
   'node',
   'context',
@@ -86,6 +90,7 @@ function usage(): string {
     '  session new [projectPath]        Create a session manually',
     '  stats [projectPath]              Show local index statistics',
     '  unresolved [options] [projectPath] Show unresolved reference summary',
+    '  analyze <kind> [args] [projectPath] Analyze dependencies, impact, dead-code, complexity, metrics, or architecture',
     '  search <query> [projectPath]     Search symbols by name',
     '  node <query> [projectPath]       Show details for a symbol or node id',
     '  context <query> [projectPath]    Build a small graph context for a query',
@@ -1534,6 +1539,9 @@ function formatToolResultSummary(tool: string, output: string): string {
   if (tool === 'applyPatch') {
     return '✓ patch applied';
   }
+  if (tool === 'task') {
+    return formatTaskToolResultForConsole(output);
+  }
 
   // 默认显示截断的输出
   if (!trimmed) {
@@ -1719,6 +1727,135 @@ function runContext(query: string | undefined, projectArg?: string): void {
     printContext(graph.buildContext(query));
   } finally {
     store.close();
+  }
+}
+
+function runAnalyze(args: string[]): void {
+  const [kind = 'metrics'] = args;
+  if (kind === '--help' || kind === '-h') {
+    console.log([
+      'Usage: code-agent analyze <kind> [args] [projectPath]',
+      '',
+      'Kinds:',
+      '  dependencies [projectPath]            Show cross-file dependencies and cycles',
+      '  impact <query> [projectPath]          Show symbols/files impacted by changing a symbol',
+      '  dead-code [projectPath]               Show likely dead code candidates',
+      '  complexity [--limit n] [projectPath]  Rank symbols by estimated complexity',
+      '  metrics [projectPath]                 Show graph metrics',
+      '  architecture [--limit n] [projectPath] Print Mermaid architecture graph',
+    ].join('\n'));
+    return;
+  }
+
+  const options = parseAnalyzeArgs(kind, args.slice(1));
+  const paths = resolveProjectPaths(options.projectArg);
+  ensureStateDir(paths.stateDir);
+  const store = createStore(paths.dbPath);
+  try {
+    const analysis = new GraphAnalysisService(store);
+
+    if (kind === 'dependencies') {
+      const dependencies = analysis.analyzeDependencies();
+      const cycles = analysis.findCircularDependencies();
+      console.log(`Dependencies: ${dependencies.length}`);
+      for (const dependency of dependencies.slice(0, options.limit)) {
+        console.log(`${dependency.from} -> ${dependency.to} (${dependency.kinds.join(',')}; ${dependency.count})`);
+      }
+      console.log('');
+      console.log(`Circular dependencies: ${cycles.length}`);
+      for (const cycle of cycles.slice(0, options.limit)) {
+        console.log(cycle.join(' -> '));
+      }
+      return;
+    }
+
+    if (kind === 'impact') {
+      if (!options.query) {
+        throw new Error('Missing query. Usage: code-agent analyze impact <query> [projectPath]');
+      }
+
+      const impact = analysis.analyzeImpact(options.query);
+      console.log(`Query: ${impact.query}`);
+      console.log(`Resolved: ${impact.resolved.length}`);
+      printNodeDetailsList(impact.resolved);
+      console.log('');
+      console.log(`Impacted nodes: ${impact.nodes.length}`);
+      printNodeDetailsList(impact.nodes.slice(0, options.limit));
+      console.log('');
+      console.log('Impacted files:');
+      printStringList(impact.files);
+      return;
+    }
+
+    if (kind === 'dead-code') {
+      const candidates = analysis.findDeadCode().slice(0, options.limit);
+      console.log(`Dead code candidates: ${candidates.length}`);
+      for (const candidate of candidates) {
+        console.log(`${candidate.node.filePath}:${candidate.node.startLine} ${candidate.node.kind} ${candidate.node.qualifiedName ?? candidate.node.name}`);
+        console.log(`  ${candidate.reason}`);
+      }
+      return;
+    }
+
+    if (kind === 'complexity') {
+      const rows = analysis.analyzeComplexity({ limit: options.limit });
+      console.log(`Complexity ranking (top ${options.limit}):`);
+      for (const row of rows) {
+        console.log(`${row.score.toString().padStart(4)} ${row.node.filePath}:${row.node.startLine} ${row.node.kind} ${row.node.qualifiedName ?? row.node.name} lines=${row.lines} fanIn=${row.fanIn} fanOut=${row.fanOut}`);
+      }
+      return;
+    }
+
+    if (kind === 'metrics') {
+      console.log(JSON.stringify(analysis.calculateMetrics(), null, 2));
+      return;
+    }
+
+    if (kind === 'architecture') {
+      console.log(analysis.renderArchitectureMermaid(options.limit));
+      return;
+    }
+
+    throw new Error(`Unknown analyze kind: ${kind}`);
+  } finally {
+    store.close();
+  }
+}
+
+function parseAnalyzeArgs(kind: string, args: string[]): { limit: number; projectArg?: string; query?: string } {
+  let limit = 20;
+  let query: string | undefined;
+  let projectArg: string | undefined;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === '--limit' || arg === '-n') {
+      limit = parseLimit(args[index + 1]);
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith('--limit=')) {
+      limit = parseLimit(arg.slice('--limit='.length));
+      continue;
+    }
+    if (kind === 'impact' && !query) {
+      query = arg;
+      continue;
+    }
+    projectArg = arg;
+  }
+
+  return { limit, projectArg, query };
+}
+
+function printStringList(values: string[]): void {
+  if (values.length === 0) {
+    console.log('No results.');
+    return;
+  }
+
+  for (const value of values) {
+    console.log(value);
   }
 }
 
@@ -1917,6 +2054,11 @@ async function main(): Promise<void> {
 
   if (command === 'unresolved') {
     runUnresolved(restArgs);
+    return;
+  }
+
+  if (command === 'analyze') {
+    runAnalyze(restArgs);
     return;
   }
 

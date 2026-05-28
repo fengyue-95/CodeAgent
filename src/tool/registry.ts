@@ -1,4 +1,5 @@
 import { GraphQueryService } from '../graph';
+import { GraphAnalysisService } from '../graph/analysis';
 import { GraphStore } from '../store/queries';
 import {
   FileEditArgs,
@@ -370,6 +371,7 @@ export function createWebTools(projectRoot: string): LocalToolDefinition[] {
 
 export function createCodeGraphTools(store: GraphStore): LocalToolDefinition[] {
   const graph = new GraphQueryService(store);
+  const analysis = new GraphAnalysisService(store);
 
   return [
     {
@@ -436,6 +438,61 @@ export function createCodeGraphTools(store: GraphStore): LocalToolDefinition[] {
       parameters: objectSchema({}),
       pattern: () => '*',
       execute: async () => store.getStats(),
+    },
+    {
+      name: 'codeGraphDependencies',
+      permission: 'code_graph.dependencies',
+      description: 'Analyze cross-file dependencies and file-level circular dependencies.',
+      parameters: objectSchema({}),
+      pattern: () => '*',
+      execute: async () => ({
+        dependencies: analysis.analyzeDependencies(),
+        cycles: analysis.findCircularDependencies(),
+      }),
+    },
+    {
+      name: 'codeGraphImpact',
+      permission: 'code_graph.impact',
+      description: 'Analyze files and symbols that may be impacted by changing a symbol.',
+      parameters: querySchema(),
+      pattern: queryPattern,
+      execute: async (args) => analysis.analyzeImpact(requireString(args.query, 'query')),
+    },
+    {
+      name: 'codeGraphDeadCode',
+      permission: 'code_graph.dead_code',
+      description: 'Find likely dead code candidates with no incoming usage edges.',
+      parameters: objectSchema({}),
+      pattern: () => '*',
+      execute: async () => analysis.findDeadCode(),
+    },
+    {
+      name: 'codeGraphComplexity',
+      permission: 'code_graph.complexity',
+      description: 'Rank symbols by estimated complexity using size, fan-in, and fan-out.',
+      parameters: objectSchema({
+        limit: numberProperty('Maximum number of complexity rows to return.'),
+      }),
+      pattern: () => '*',
+      execute: async (args) => analysis.analyzeComplexity({ limit: getLimit(args.limit) }),
+    },
+    {
+      name: 'codeGraphMetrics',
+      permission: 'code_graph.metrics',
+      description: 'Calculate graph-level code metrics including dependency, coupling, and dead-code counts.',
+      parameters: objectSchema({}),
+      pattern: () => '*',
+      execute: async () => analysis.calculateMetrics(),
+    },
+    {
+      name: 'codeGraphArchitecture',
+      permission: 'code_graph.architecture',
+      description: 'Render an architecture dependency graph in Mermaid format.',
+      parameters: objectSchema({
+        limit: numberProperty('Maximum number of dependency edges to render.'),
+      }),
+      pattern: () => '*',
+      execute: async (args) => analysis.renderArchitectureMermaid(getLimit(args.limit)),
     },
   ];
 }
