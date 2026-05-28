@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:github.com)",
+      "Bash(gh repo:*)",
+      "Bash(npm install:*)",
+      "Bash(npm test:*)",
+      "Bash(npm run:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:api.github.com)",
+      "WebSearch",
+      "Bash(chmod +x:*)",
+      "Bash(grep -E \"^-.*\\\\.md$|^d.*docs$|^d.*examples$\")",
+      "Bash(ls tests/unit/*.test.ts tests/*.test.ts)",
+      "Bash(npx tsc:*)"
+    ]
+  }
+}

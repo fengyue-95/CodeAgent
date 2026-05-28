@@ -327,3 +327,59 @@ npm run check
 npm run build
 node dist/bin/code-agent.js --help
 ```
+
+## 测试
+
+项目使用 Vitest 作为测试框架。
+
+### 运行测试
+
+```bash
+# 运行所有测试
+npm test
+
+# 监听模式（开发时使用）
+npm run test:watch
+
+# 生成覆盖率报告
+npm run test:coverage
+
+# 打开测试 UI
+npm run test:ui
+```
+
+### 测试文档
+
+详细的测试指南请查看：
+- [测试指南](docs/testing.md) - 完整的测试文档和最佳实践
+- [测试状态](docs/testing-status.md) - 当前测试状态和计划
+- [完成报告](docs/testing-complete.md) - 测试基础设施完成报告
+
+## 文档
+
+### 核心文档
+
+- [架构设计](docs/architecture.md) - 系统架构、模块设计、数据流
+- [图谱模型](docs/graph-schema.md) - 代码图谱数据模型和查询
+- [工具开发](docs/tool-development.md) - 自定义工具开发指南
+- [贡献指南](CONTRIBUTING.md) - 如何为项目做贡献
+
+### 示例和教程
+
+- [使用示例](examples/README.md) - 11 个详细使用场景
+- [基础示例](examples/basic/README.md) - 可执行的基础示例脚本
+
+### 快速开始
+
+```bash
+# 运行基础示例
+cd examples/basic
+./run-all.sh
+
+# 或单独运行
+./01-index-project.sh
+./02-search-symbols.sh
+./03-query-relationships.sh
+./04-use-agent.sh
+./05-tui-mode.sh
+```
