@@ -650,11 +650,3 @@ code-agent --help
 code-agent run --help
 code-agent tui --help
 ```
-
-## 🙏 致谢
-
-感谢 [OpenCode](https://github.com/anomalyco/opencode) 项目提供的优秀架构设计和实现参考。
-
-## 📄 许可证
-
-MIT
