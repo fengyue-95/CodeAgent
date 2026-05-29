@@ -39,7 +39,12 @@
       "Bash(npx tsx:*)",
       "Bash(find /Users/fengyue/PycharmProjects/CodeAgent/src -name \"*.ts\" -exec grep -l \"tool.*registry\\\\|tool.*loader\\\\|plugin\\\\|extension\" {} \\\\;)",
       "Bash(./dist/bin/code-agent.js mcp:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(xargs -I {} sh -c 'echo \"=== {} ===\" && head -30 {}')",
+      "Bash(python3 -m json.tool)",
+      "Bash(xargs cat:*)",
+      "Bash(./dist/bin/code-agent.js skill:*)"
     ]
   }
 }

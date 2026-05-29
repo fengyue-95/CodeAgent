@@ -18,6 +18,7 @@ import {
 } from '../tool';
 import { ContextCompressor } from './context-compressor';
 import { McpPluginManager, loadMcpConfig } from '../mcp';
+import { SkillLoader, SkillRegistry, SkillExecutor } from '../skill';
 
 export interface AgentRuntimeInput {
   task: string;
@@ -31,6 +32,8 @@ export interface AgentRuntimeInput {
   temperature?: number;
   toolMode?: LocalToolMode;
   mcpEnabled?: boolean;
+  skillName?: string;
+  skillArgs?: string;
   onEvent?: (event: AgentRuntimeEvent) => void | Promise<void>;
   onPermissionRequest?: (request: AgentPermissionRequest) => boolean | Promise<boolean>;
   subTaskDepth?: number;
@@ -92,9 +95,10 @@ const MAX_STREAMED_WRITE_ARGUMENT_CHARS = 16 * 1024;
 
 export class AgentRuntime {
   private mcpPluginManager?: McpPluginManager;
+  private skillRegistry?: SkillRegistry;
 
   async run(input: AgentRuntimeInput): Promise<AgentRuntimeResult> {
-    const agent = resolveAgent(input.agent);
+    let agent = resolveAgent(input.agent);
     if (!agent) {
       throw new Error(`Unknown agent: ${input.agent}`);
     }
@@ -102,6 +106,42 @@ export class AgentRuntime {
     const paths = resolveProjectPaths(input.projectPath);
     ensureStateDir(paths.stateDir);
     const store = createStore(paths.dbPath);
+
+    // 初始化 Skill Registry
+    try {
+      const skillLoader = new SkillLoader();
+      this.skillRegistry = new SkillRegistry(skillLoader);
+      await this.skillRegistry.registerAll();
+    } catch (error) {
+      console.error('[Skill] Failed to initialize skill registry:', error);
+      this.skillRegistry = undefined;
+    }
+
+    // 如果指定了 skill，执行 skill
+    if (input.skillName && this.skillRegistry) {
+      const skill = this.skillRegistry.get(input.skillName);
+      if (!skill) {
+        throw new Error(`Skill not found: ${input.skillName}`);
+      }
+
+      // 使用 skill 指定的 agent（如果有）
+      if (skill.frontmatter.agent) {
+        const skillAgent = resolveAgent(skill.frontmatter.agent);
+        if (skillAgent) {
+          agent = skillAgent;
+        }
+      }
+
+      // 构建 skill prompt
+      const executor = new SkillExecutor();
+      const skillPrompt = await executor.execute(skill, input.skillArgs ?? '', {
+        agent,
+        projectPath: paths.root,
+      });
+
+      // 将 skill prompt 作为任务执行
+      input.task = skillPrompt;
+    }
 
     // 初始化 MCP 插件管理器
     if (input.mcpEnabled !== false) {

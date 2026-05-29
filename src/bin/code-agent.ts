@@ -17,6 +17,7 @@ import {
   disableServer,
   getConfigPath,
 } from '../mcp';
+import { SkillInstaller } from '../skill';
 import { createDefaultIndexService } from '../service/default-service';
 import {
   FileWatcher,
@@ -58,7 +59,8 @@ type Command =
   | 'callees'
   | 'refs'
   | 'references'
-  | 'mcp';
+  | 'mcp'
+  | 'skill';
 
 const commands: Command[] = [
   'run',
@@ -81,6 +83,7 @@ const commands: Command[] = [
   'refs',
   'references',
   'mcp',
+  'skill',
 ];
 
 function usage(): string {
@@ -109,6 +112,7 @@ function usage(): string {
     '  references <symbol> [projectPath] Alias for refs',
     '  serve [options] [projectPath]    Start the MCP stdio server',
     '  mcp <action> [name]              Manage MCP plugins; action: list, status, enable, disable, test',
+    '  skill <action> [args]            Manage skills; action: list, show, run, install, uninstall, update',
     '',
     'Global options:',
     '  --verbose                        Enable verbose output',
@@ -2102,6 +2106,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === 'skill') {
+    await runSkill(restArgs);
+    return;
+  }
+
   if (command === 'callers') {
     runCallers(firstArg, projectArg);
     return;
@@ -2299,6 +2308,211 @@ async function runMcp(args: string[]): Promise<void> {
 
   console.error(`Unknown action: ${action}`);
   console.log('Run "code-agent mcp" for usage information');
+  process.exit(1);
+}
+
+async function runSkill(args: string[]): Promise<void> {
+  const action = args[0];
+
+  if (!action) {
+    console.log('Usage: code-agent skill <action> [args]');
+    console.log('');
+    console.log('Actions:');
+    console.log('  list                     List all installed skills');
+    console.log('  show <name>              Show skill details');
+    console.log('  run <name> [args]        Run a skill');
+    console.log('  install <source>         Install a skill');
+    console.log('  uninstall <name>         Uninstall a skill');
+    console.log('  update [name]            Update skill(s)');
+    console.log('  search <query>           Search skills');
+    console.log('');
+    console.log('Install sources:');
+    console.log('  github:user/repo         Install from GitHub');
+    console.log('  gitlab:user/repo         Install from GitLab');
+    console.log('  https://...git           Install from Git URL');
+    console.log('  ./path                   Install from local path');
+    console.log('  skill-name               Install from marketplace');
+    console.log('');
+    console.log('Options:');
+    console.log('  --force                  Force overwrite');
+    console.log('  --dev                    Install in dev mode (symlink)');
+    return;
+  }
+
+  const installer = new SkillInstaller();
+
+  if (action === 'list') {
+    const skills = await installer.list();
+
+    console.log('Installed Skills:');
+    console.log('');
+
+    if (skills.length === 0) {
+      console.log('  No skills installed.');
+      console.log('  Install a skill with: code-agent skill install <source>');
+      return;
+    }
+
+    for (const skill of skills) {
+      const devFlag = skill.dev ? ' (dev)' : '';
+      console.log(`  ${skill.name}@${skill.version}${devFlag}`);
+      console.log(`    Source: ${skill.source}`);
+      console.log(`    Installed: ${skill.installedAt}`);
+      console.log('');
+    }
+    return;
+  }
+
+  if (action === 'show') {
+    const name = args[1];
+    if (!name) {
+      console.error('Error: Skill name required');
+      console.log('Usage: code-agent skill show <name>');
+      process.exit(1);
+    }
+
+    const { SkillLoader } = require('../skill');
+    const loader = new SkillLoader();
+    const skill = await loader.loadSkill(name);
+
+    if (!skill) {
+      console.error(`Skill not found: ${name}`);
+      process.exit(1);
+    }
+
+    console.log(`Skill: ${skill.name}`);
+    console.log(`Description: ${skill.frontmatter.description}`);
+    if (skill.frontmatter.agent) {
+      console.log(`Agent: ${skill.frontmatter.agent}`);
+    }
+    if (skill.frontmatter.tools) {
+      const tools = Array.isArray(skill.frontmatter.tools)
+        ? skill.frontmatter.tools.join(', ')
+        : skill.frontmatter.tools;
+      console.log(`Tools: ${tools}`);
+    }
+    console.log('');
+    console.log('Content:');
+    console.log(skill.content);
+    return;
+  }
+
+  if (action === 'run') {
+    const name = args[1];
+    if (!name) {
+      console.error('Error: Skill name required');
+      console.log('Usage: code-agent skill run <name> [args]');
+      process.exit(1);
+    }
+
+    const skillArgs = args.slice(2).join(' ');
+
+    // 使用 code-agent run 执行 skill
+    const { AgentRuntime } = require('../runtime');
+    const { createDeepSeekProvider } = require('../provider');
+
+    const provider = createDeepSeekProvider();
+    const runtime = new AgentRuntime();
+
+    console.log(`Running skill: ${name}`);
+    console.log('');
+
+    const result = await runtime.run({
+      task: '', // 将被 skill prompt 替换
+      projectPath: process.cwd(),
+      provider,
+      skillName: name,
+      skillArgs,
+    });
+
+    console.log('');
+    console.log(`✓ Skill ${name} completed`);
+    return;
+  }
+
+  if (action === 'install') {
+    const source = args[1];
+    if (!source) {
+      console.error('Error: Source required');
+      console.log('Usage: code-agent skill install <source>');
+      process.exit(1);
+    }
+
+    const options = {
+      force: args.includes('--force'),
+      dev: args.includes('--dev'),
+    };
+
+    await installer.install(source, options);
+    return;
+  }
+
+  if (action === 'uninstall') {
+    const name = args[1];
+    if (!name) {
+      console.error('Error: Skill name required');
+      console.log('Usage: code-agent skill uninstall <name>');
+      process.exit(1);
+    }
+
+    await installer.uninstall(name);
+    return;
+  }
+
+  if (action === 'update') {
+    const name = args[1];
+
+    if (name) {
+      await installer.update(name);
+    } else {
+      // 更新所有 skills
+      const skills = await installer.list();
+      for (const skill of skills) {
+        if (!skill.dev) {
+          try {
+            await installer.update(skill.name);
+          } catch (error) {
+            console.error(`Failed to update ${skill.name}:`, error);
+          }
+        }
+      }
+    }
+    return;
+  }
+
+  if (action === 'search') {
+    const query = args[1];
+    if (!query) {
+      console.error('Error: Search query required');
+      console.log('Usage: code-agent skill search <query>');
+      process.exit(1);
+    }
+
+    const { SkillLoader, SkillRegistry } = require('../skill');
+    const loader = new SkillLoader();
+    const registry = new SkillRegistry(loader);
+    await registry.registerAll();
+
+    const results = registry.search(query);
+
+    console.log(`Search results for "${query}":`);
+    console.log('');
+
+    if (results.length === 0) {
+      console.log('  No skills found.');
+      return;
+    }
+
+    for (const skill of results) {
+      console.log(`  ${skill.name}`);
+      console.log(`    ${skill.frontmatter.description}`);
+      console.log('');
+    }
+    return;
+  }
+
+  console.error(`Unknown action: ${action}`);
+  console.log('Run "code-agent skill" for usage information');
   process.exit(1);
 }
 
