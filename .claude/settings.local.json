@@ -36,7 +36,10 @@
       "Bash(curl -s \"https://api.github.com/repos/anomalyco/opencode/contents/\")",
       "WebFetch(domain:opencode.ai)",
       "Bash(grep:*)",
-      "Bash(npx tsx:*)"
+      "Bash(npx tsx:*)",
+      "Bash(find /Users/fengyue/PycharmProjects/CodeAgent/src -name \"*.ts\" -exec grep -l \"tool.*registry\\\\|tool.*loader\\\\|plugin\\\\|extension\" {} \\\\;)",
+      "Bash(./dist/bin/code-agent.js mcp:*)",
+      "Bash(git add:*)"
     ]
   }
 }

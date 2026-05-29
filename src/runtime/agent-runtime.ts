@@ -17,6 +17,7 @@ import {
   createLocalToolRegistry,
 } from '../tool';
 import { ContextCompressor } from './context-compressor';
+import { McpPluginManager, loadMcpConfig } from '../mcp';
 
 export interface AgentRuntimeInput {
   task: string;
@@ -29,6 +30,7 @@ export interface AgentRuntimeInput {
   maxSteps?: number;
   temperature?: number;
   toolMode?: LocalToolMode;
+  mcpEnabled?: boolean;
   onEvent?: (event: AgentRuntimeEvent) => void | Promise<void>;
   onPermissionRequest?: (request: AgentPermissionRequest) => boolean | Promise<boolean>;
   subTaskDepth?: number;
@@ -89,6 +91,8 @@ interface StreamStepResult {
 const MAX_STREAMED_WRITE_ARGUMENT_CHARS = 16 * 1024;
 
 export class AgentRuntime {
+  private mcpPluginManager?: McpPluginManager;
+
   async run(input: AgentRuntimeInput): Promise<AgentRuntimeResult> {
     const agent = resolveAgent(input.agent);
     if (!agent) {
@@ -98,6 +102,27 @@ export class AgentRuntime {
     const paths = resolveProjectPaths(input.projectPath);
     ensureStateDir(paths.stateDir);
     const store = createStore(paths.dbPath);
+
+    // 初始化 MCP 插件管理器
+    if (input.mcpEnabled !== false) {
+      try {
+        this.mcpPluginManager = new McpPluginManager({
+          onPluginStatusChange: (name, status) => {
+            console.log(`[MCP] Plugin ${name} status: ${status}`);
+          },
+          onPluginError: (name, error) => {
+            console.error(`[MCP] Plugin ${name} error:`, error);
+          },
+        });
+        const config = loadMcpConfig();
+        await this.mcpPluginManager.loadEnabledPlugins(config);
+      } catch (error) {
+        console.error('[MCP] Failed to initialize plugin manager:', error);
+        // 继续执行，不阻塞主流程
+        this.mcpPluginManager = undefined;
+      }
+    }
+
     try {
       const sessions = store.sessions();
       const session = input.sessionId
@@ -165,6 +190,10 @@ export class AgentRuntime {
         };
       }
     } finally {
+      // 清理 MCP 插件
+      if (this.mcpPluginManager) {
+        await this.mcpPluginManager.stopAll();
+      }
       store.close();
     }
   }
@@ -184,6 +213,7 @@ export class AgentRuntime {
       store: context.store,
       mode: context.input.toolMode,
       runTask: (taskInput) => this.runSubTask(context, taskInput),
+      mcpPluginManager: this.mcpPluginManager,
     });
     const tools = registry.all();
     let lastAssistant: SessionMessage | undefined;

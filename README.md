@@ -9,7 +9,7 @@ CodeAgent 是一个基于 AI 的代码助手，提供代码图谱分析、智能
 - 🔍 **代码图谱** - 基于 Tree-sitter 的深度代码分析
 - 🤖 **10 个专业 Agent** - 针对不同任务优化的 AI 助手
 - 📊 **依赖分析** - 可视化依赖关系和影响分析
-- 🔧 **MCP 集成** - 支持 Model Context Protocol
+- 🔧 **MCP 插拔系统** - 动态加载/卸载 MCP 服务，扩展工具能力
 - 💬 **交互式 TUI** - 强大的终端用户界面
 - 🛠️ **工具模式** - 灵活的权限控制（core/full）
 
@@ -247,6 +247,114 @@ code-agent run "审查 src/user/service.ts" --agent review
 code-agent run "修复测试失败" --agent build --tools full
 ```
 
+## 🔌 MCP 插拔系统
+
+CodeAgent 支持动态加载和管理 MCP (Model Context Protocol) 服务，让 Agent 可以访问外部工具和数据源。
+
+### 配置 MCP 服务
+
+编辑 `~/.code-agent/mcp-config.json`：
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed"],
+      "enabled": true
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+      },
+      "enabled": false
+    },
+    "postgres": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://localhost/mydb"],
+      "enabled": true
+    }
+  }
+}
+```
+
+### MCP 管理命令
+
+```bash
+# 列出所有 MCP 服务
+code-agent mcp list
+
+# 查看服务状态
+code-agent mcp status
+code-agent mcp status github
+
+# 启用/禁用服务
+code-agent mcp enable github
+code-agent mcp disable github
+
+# 测试连接
+code-agent mcp test github
+```
+
+### 使用 MCP 工具
+
+MCP 服务启用后，其工具会自动注册到 Agent 中：
+
+```bash
+# 使用 GitHub MCP 创建 issue
+code-agent run "在 myrepo 创建一个 bug issue" --tools full
+
+# 使用 Postgres MCP 查询数据库
+code-agent run "查询 users 表中的活跃用户" --tools full
+
+# 使用 Filesystem MCP 读取文件
+code-agent run "读取 /data/config.json 的内容" --tools full
+```
+
+### 常用 MCP 服务
+
+| 服务 | 功能 | 安装命令 |
+|------|------|----------|
+| **filesystem** | 文件系统访问 | `npx @modelcontextprotocol/server-filesystem` |
+| **github** | GitHub API | `npx @modelcontextprotocol/server-github` |
+| **postgres** | PostgreSQL 数据库 | `npx @modelcontextprotocol/server-postgres` |
+| **sqlite** | SQLite 数据库 | `npx @modelcontextprotocol/server-sqlite` |
+| **puppeteer** | 浏览器自动化 | `npx @modelcontextprotocol/server-puppeteer` |
+
+### MCP 权限控制
+
+MCP 工具遵循 Agent 的权限规则：
+
+- 默认需要用户确认（`mcp.*` → `ask`）
+- 可在 Agent 配置中自定义权限
+- 支持按服务和工具细粒度控制
+
+```typescript
+// 示例：允许特定 MCP 工具自动执行
+permissionRule('mcp.filesystem.read_file', 'allow')
+permissionRule('mcp.github.search_*', 'allow')
+permissionRule('mcp.postgres.query', 'ask')
+```
+
+### 环境变量替换
+
+配置中的环境变量会自动替换：
+
+```json
+{
+  "env": {
+    "GITHUB_TOKEN": "${GITHUB_TOKEN}",
+    "API_KEY": "${MY_API_KEY}"
+  }
+}
+```
+
+运行时会从系统环境变量中读取 `GITHUB_TOKEN` 和 `MY_API_KEY`。
+
+
+
 ### 工具模式
 
 **core 模式**（默认）- 只读工具集：
@@ -259,6 +367,7 @@ code-agent run "修复测试失败" --agent build --tools full
 - Shell 执行（shell）
 - Web 访问（webFetch, webSearch, browser）
 - 子任务（todo, subagent）
+- **MCP 插件工具**（如果已启用）
 
 ### 常用参数
 

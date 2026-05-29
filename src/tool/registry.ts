@@ -57,6 +57,7 @@ export interface LocalToolRegistryInput {
   store: GraphStore;
   mode?: LocalToolMode;
   runTask?: LocalSubTaskRunner;
+  mcpPluginManager?: import('../mcp').McpPluginManager;
 }
 
 export interface LocalSubTaskInput {
@@ -81,6 +82,8 @@ export function createLocalToolRegistry(input: LocalToolRegistryInput): ToolRegi
     ...createTaskTools(input.runTask),
     // Web 工具可选，只在 full 模式下启用
     ...(mode === 'full' ? createWebTools(input.projectRoot) : []),
+    // MCP 插件工具
+    ...(input.mcpPluginManager?.getAllTools() ?? []),
   ];
 
   const byName = new Map(tools.map((tool) => [tool.name, tool]));

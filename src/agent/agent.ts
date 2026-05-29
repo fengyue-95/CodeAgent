@@ -49,6 +49,8 @@ const basePermissions: AgentPermissionRuleset = [
   permissionRule('browser.content', 'allow'),
   permissionRule('browser.screenshot', 'ask'),
   permissionRule('browser.close', 'allow'),
+  // MCP 工具权限
+  permissionRule('mcp.*', 'ask'),
 ];
 
 export const buildAgent: AgentInfo = {

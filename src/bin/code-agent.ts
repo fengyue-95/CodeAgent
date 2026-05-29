@@ -10,6 +10,13 @@ import { CodeEdge, CodeNode } from '../types';
 import { GraphContextResult, GraphQueryService, RelatedNode } from '../graph';
 import { GraphAnalysisService } from '../graph/analysis';
 import { startMcpServer } from '../mcp/server';
+import {
+  McpPluginManager,
+  loadMcpConfig,
+  enableServer,
+  disableServer,
+  getConfigPath,
+} from '../mcp';
 import { createDefaultIndexService } from '../service/default-service';
 import {
   FileWatcher,
@@ -50,7 +57,8 @@ type Command =
   | 'callers'
   | 'callees'
   | 'refs'
-  | 'references';
+  | 'references'
+  | 'mcp';
 
 const commands: Command[] = [
   'run',
@@ -72,6 +80,7 @@ const commands: Command[] = [
   'callees',
   'refs',
   'references',
+  'mcp',
 ];
 
 function usage(): string {
@@ -99,6 +108,7 @@ function usage(): string {
     '  refs <symbol> [projectPath]      Find references to a symbol',
     '  references <symbol> [projectPath] Alias for refs',
     '  serve [options] [projectPath]    Start the MCP stdio server',
+    '  mcp <action> [name]              Manage MCP plugins; action: list, status, enable, disable, test',
     '',
     'Global options:',
     '  --verbose                        Enable verbose output',
@@ -2087,6 +2097,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === 'mcp') {
+    await runMcp(restArgs);
+    return;
+  }
+
   if (command === 'callers') {
     runCallers(firstArg, projectArg);
     return;
@@ -2103,6 +2118,188 @@ async function main(): Promise<void> {
   }
 
   runStats(firstArg);
+}
+
+async function runMcp(args: string[]): Promise<void> {
+  const action = args[0];
+  const name = args[1];
+
+  if (!action) {
+    console.log('Usage: code-agent mcp <action> [name]');
+    console.log('');
+    console.log('Actions:');
+    console.log('  list              List all MCP servers');
+    console.log('  status [name]     Show status of MCP server(s)');
+    console.log('  enable <name>     Enable an MCP server');
+    console.log('  disable <name>    Disable an MCP server');
+    console.log('  test <name>       Test connection to an MCP server');
+    console.log('');
+    console.log('Config file: ' + getConfigPath());
+    return;
+  }
+
+  const config = loadMcpConfig();
+
+  if (action === 'list') {
+    console.log('MCP Servers:');
+    console.log('');
+    const servers = Object.entries(config.mcpServers);
+    if (servers.length === 0) {
+      console.log('  No MCP servers configured.');
+      console.log('  Edit config file: ' + getConfigPath());
+      return;
+    }
+
+    for (const [serverName, serverConfig] of servers) {
+      const status = serverConfig.enabled ? '✓ enabled' : '✗ disabled';
+      console.log(`  ${serverName.padEnd(20)} ${status}`);
+      console.log(`    command: ${serverConfig.command} ${serverConfig.args.join(' ')}`);
+      if (serverConfig.env) {
+        console.log(`    env: ${Object.keys(serverConfig.env).join(', ')}`);
+      }
+      console.log('');
+    }
+    return;
+  }
+
+  if (action === 'status') {
+    const manager = new McpPluginManager();
+    await manager.loadEnabledPlugins(config);
+
+    if (name) {
+      const plugin = manager.getPlugin(name);
+      if (!plugin) {
+        console.error(`MCP server not found: ${name}`);
+        process.exit(1);
+      }
+
+      console.log(`MCP Server: ${name}`);
+      console.log(`  Status: ${plugin.status}`);
+      console.log(`  Enabled: ${plugin.config.enabled}`);
+      console.log(`  Command: ${plugin.config.command} ${plugin.config.args.join(' ')}`);
+      if (plugin.error) {
+        console.log(`  Error: ${plugin.error}`);
+      }
+      if (plugin.tools.length > 0) {
+        console.log(`  Tools: ${plugin.tools.length}`);
+        for (const tool of plugin.tools) {
+          console.log(`    - ${tool.name}`);
+        }
+      }
+    } else {
+      const plugins = manager.getAllPlugins();
+      console.log('MCP Server Status:');
+      console.log('');
+      for (const plugin of plugins) {
+        const statusIcon = plugin.status === 'running' ? '✓' : plugin.status === 'error' ? '✗' : '○';
+        console.log(`  ${statusIcon} ${plugin.name.padEnd(20)} ${plugin.status}`);
+        if (plugin.status === 'running') {
+          console.log(`    Tools: ${plugin.tools.length}`);
+        }
+        if (plugin.error) {
+          console.log(`    Error: ${plugin.error}`);
+        }
+      }
+    }
+
+    await manager.stopAll();
+    return;
+  }
+
+  if (action === 'enable') {
+    if (!name) {
+      console.error('Error: Server name required');
+      console.log('Usage: code-agent mcp enable <name>');
+      process.exit(1);
+    }
+
+    if (!config.mcpServers[name]) {
+      console.error(`MCP server not found: ${name}`);
+      process.exit(1);
+    }
+
+    enableServer(name);
+    console.log(`✓ Enabled MCP server: ${name}`);
+    return;
+  }
+
+  if (action === 'disable') {
+    if (!name) {
+      console.error('Error: Server name required');
+      console.log('Usage: code-agent mcp disable <name>');
+      process.exit(1);
+    }
+
+    if (!config.mcpServers[name]) {
+      console.error(`MCP server not found: ${name}`);
+      process.exit(1);
+    }
+
+    disableServer(name);
+    console.log(`✓ Disabled MCP server: ${name}`);
+    return;
+  }
+
+  if (action === 'test') {
+    if (!name) {
+      console.error('Error: Server name required');
+      console.log('Usage: code-agent mcp test <name>');
+      process.exit(1);
+    }
+
+    const serverConfig = config.mcpServers[name];
+    if (!serverConfig) {
+      console.error(`MCP server not found: ${name}`);
+      process.exit(1);
+    }
+
+    console.log(`Testing MCP server: ${name}`);
+    console.log(`  Command: ${serverConfig.command} ${serverConfig.args.join(' ')}`);
+    console.log('');
+
+    const manager = new McpPluginManager({
+      onPluginStatusChange: (pluginName, status) => {
+        console.log(`  Status: ${status}`);
+      },
+      onPluginError: (pluginName, error) => {
+        console.error(`  Error: ${error.message}`);
+      },
+    });
+
+    try {
+      await manager.startPlugin(name, serverConfig);
+      const plugin = manager.getPlugin(name);
+
+      if (plugin && plugin.status === 'running') {
+        console.log(`✓ Connection successful`);
+        console.log(`  Tools available: ${plugin.tools.length}`);
+        if (plugin.tools.length > 0) {
+          console.log('');
+          console.log('  Available tools:');
+          for (const tool of plugin.tools) {
+            console.log(`    - ${tool.name}: ${tool.description}`);
+          }
+        }
+      } else {
+        console.error(`✗ Connection failed`);
+        if (plugin?.error) {
+          console.error(`  Error: ${plugin.error}`);
+        }
+        process.exit(1);
+      }
+    } catch (error) {
+      console.error(`✗ Connection failed: ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    } finally {
+      await manager.stopAll();
+    }
+
+    return;
+  }
+
+  console.error(`Unknown action: ${action}`);
+  console.log('Run "code-agent mcp" for usage information');
+  process.exit(1);
 }
 
 main().catch((error: unknown) => {
