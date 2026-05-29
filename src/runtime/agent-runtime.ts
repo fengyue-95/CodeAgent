@@ -16,6 +16,7 @@ import {
   LocalSubTaskInput,
   createLocalToolRegistry,
 } from '../tool';
+import { ContextCompressor } from './context-compressor';
 
 export interface AgentRuntimeInput {
   task: string;
@@ -637,31 +638,25 @@ export class AgentRuntime {
   }
 
   private providerMessages(agent: AgentInfo, timeline: SessionMessageWithParts[], excludeMessageId?: string): ProviderMessage[] {
-    const messages: ProviderMessage[] = [
-      {
-        role: 'system',
-        content: agent.systemPrompt,
-      },
-    ];
+    // 过滤掉排除的消息
+    const filteredTimeline = timeline.filter(
+      item => item.message.id !== excludeMessageId
+    );
 
-    for (const item of timeline) {
-      if (item.message.id === excludeMessageId) {
-        continue;
-      }
+    // 使用上下文压缩器
+    const compressor = new ContextCompressor({
+      maxTokens: 100000,
+      keepRecentCount: 10,
+      enableCompression: true,
+    });
 
-      messages.push(messageToProviderMessage(item));
-      for (const part of item.parts) {
-        if (part.type === 'tool-result') {
-          messages.push({
-            role: 'tool',
-            toolCallId: part.callId,
-            content: part.output,
-          });
-        }
-      }
+    // 获取压缩统计（可选，用于调试）
+    const stats = compressor.getStats(agent.systemPrompt, filteredTimeline);
+    if (stats.needsCompression) {
+      console.error(`[Context Compression] Total: ${stats.totalMessages} messages, ${stats.totalTokens} tokens, compression ratio: ${(stats.compressionRatio ?? 0).toFixed(2)}`);
     }
 
-    return messages;
+    return compressor.compress(agent.systemPrompt, filteredTimeline);
   }
 
 }

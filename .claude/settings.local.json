@@ -32,7 +32,11 @@
       "Bash(grep -E \"\\\\.\\(ts|js|json\\)$\")",
       "Bash(ls:*)",
       "Bash(mkdir -p ~/.local/bin)",
-      "Bash(ln -sf /Users/fengyue/PycharmProjects/CodeAgent/dist/bin/code-agent.js ~/.local/bin/code-agent)"
+      "Bash(ln -sf /Users/fengyue/PycharmProjects/CodeAgent/dist/bin/code-agent.js ~/.local/bin/code-agent)",
+      "Bash(curl -s \"https://api.github.com/repos/anomalyco/opencode/contents/\")",
+      "WebFetch(domain:opencode.ai)",
+      "Bash(grep:*)",
+      "Bash(npx tsx:*)"
     ]
   }
 }

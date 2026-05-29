@@ -402,7 +402,9 @@ function printTuiEvent(event: AgentRuntimeEvent, state: TuiState): void {
 
   if (event.type === 'tool-call') {
     closeTextLine();
-    const suffix = state.showDetails ? ` ${truncate(JSON.stringify(event.input), 500)}` : '';
+    // 对于某些工具，默认显示输入
+    const shouldShowInput = ['todowrite', 'plan', 'task'].includes(event.tool) || state.showDetails;
+    const suffix = shouldShowInput ? ` ${truncate(JSON.stringify(event.input), 500)}` : '';
     console.log(`${badge('tool', 'magenta')} ${event.tool} ${dim('start')}${suffix}`);
     return;
   }
@@ -421,22 +423,38 @@ function printTuiEvent(event: AgentRuntimeEvent, state: TuiState): void {
 
   if (event.type === 'tool-result') {
     closeTextLine();
-    if (event.tool === 'task') {
-      const task = parseTaskToolOutput(event.output);
-      const meta = task
-        ? [
-          task.status ?? 'completed',
-          typeof task.steps === 'number' ? `${task.steps} step(s)` : undefined,
-        ].filter(Boolean).join('; ')
-        : 'done';
-      console.log(`${badge('tool', 'green')} ${event.tool} ${dim(meta)}`);
-      const output = task?.output?.trim();
-      if (output) {
-        console.log(output);
+
+    // 特殊处理需要显示详细输出的工具
+    const verboseTools = ['task', 'todowrite', 'plan'];
+
+    if (verboseTools.includes(event.tool)) {
+      if (event.tool === 'task') {
+        const task = parseTaskToolOutput(event.output);
+        const meta = task
+          ? [
+            task.status ?? 'completed',
+            typeof task.steps === 'number' ? `${task.steps} step(s)` : undefined,
+          ].filter(Boolean).join('; ')
+          : 'done';
+        console.log(`${badge('tool', 'green')} ${event.tool} ${dim(meta)}`);
+        const output = task?.output?.trim();
+        if (output) {
+          console.log(output);
+        }
+      } else {
+        // todowrite, plan 等工具显示完整输出
+        console.log(`${badge('tool', 'green')} ${event.tool} ${dim('done')}`);
+        const output = event.output.trim();
+        if (output) {
+          // 对于较长的输出，显示前 2000 字符
+          const displayOutput = output.length > 2000 ? `${output.slice(0, 2000)}...\n${dim(`(${output.length} chars total, truncated)`)}` : output;
+          console.log(displayOutput);
+        }
       }
       return;
     }
 
+    // 其他工具的默认处理
     const suffix = state.showDetails ? ` ${truncate(event.output.replace(/\s+/g, ' '), 700)}` : '';
     console.log(`${badge('tool', 'green')} ${event.tool} ${dim('done')}${suffix}`);
     return;
