@@ -37,4 +37,11 @@ describe('agent defaults', () => {
     expect(BUILD_SYSTEM_PROMPT).toContain('If verification fails');
     expect(BUILD_SYSTEM_PROMPT).toContain('do not claim the task is complete');
   });
+
+  it('instructs build mode to inspect definitions before fixing type errors', () => {
+    expect(BUILD_SYSTEM_PROMPT).toContain('compile or type errors');
+    expect(BUILD_SYSTEM_PROMPT).toContain('read the target symbol definition');
+    expect(BUILD_SYSTEM_PROMPT).toContain('search existing call sites');
+    expect(BUILD_SYSTEM_PROMPT).toContain('Do not guess method signatures, constructor parameters, DTO fields, or setter names');
+  });
 });
