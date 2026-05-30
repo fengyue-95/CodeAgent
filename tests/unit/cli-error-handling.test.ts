@@ -73,8 +73,8 @@ describe('CLI Error Handling', () => {
     });
 
     it('should preserve non-global options', () => {
-      const result = stripGlobalOptions(['--verbose', '--agent', 'build', '--debug']);
-      expect(result).toEqual(['--agent', 'build']);
+      const result = stripGlobalOptions(['--verbose', '--agent', 'build', '--auto-extend-steps', '--debug']);
+      expect(result).toEqual(['--agent', 'build', '--auto-extend-steps']);
     });
 
     it('should handle mixed options', () => {

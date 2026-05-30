@@ -28,7 +28,7 @@ export interface AgentInfo {
   permission: AgentPermissionRuleset;
 }
 
-const DEFAULT_MAX_STEPS = 100; // 增加到 100 步，适应复杂任务
+const DEFAULT_MAX_STEPS = 200; // Longer default for complex tasks
 
 const basePermissions: AgentPermissionRuleset = [
   permissionRule('*', 'ask'),
@@ -106,7 +106,7 @@ export const planAgent: AgentInfo = {
 
 export const generalAgent: AgentInfo = {
   name: 'general',
-  mode: 'primary',
+  mode: 'subagent',
   description: 'Versatile agent for complex, multi-step tasks. Full access to all tools including read, write, shell, and web.',
   systemPrompt: GENERAL_SYSTEM_PROMPT,
   maxSteps: DEFAULT_MAX_STEPS,
@@ -136,10 +136,10 @@ export const generalAgent: AgentInfo = {
 
 export const exploreAgent: AgentInfo = {
   name: 'explore',
-  mode: 'primary',
+  mode: 'subagent',
   description: 'Fast codebase exploration agent. Read-only access optimized for understanding code structure and relationships.',
   systemPrompt: EXPLORE_SYSTEM_PROMPT,
-  maxSteps: 50, // Shorter for quick exploration
+  maxSteps: DEFAULT_MAX_STEPS,
   permission: mergeAgentPermissions(
     basePermissions,
     [
@@ -165,10 +165,10 @@ export const exploreAgent: AgentInfo = {
 
 export const scoutAgent: AgentInfo = {
   name: 'scout',
-  mode: 'primary',
+  mode: 'subagent',
   description: 'External documentation and dependency research agent. Read-only with web access for gathering external information.',
   systemPrompt: SCOUT_SYSTEM_PROMPT,
-  maxSteps: 50, // Shorter for focused research
+  maxSteps: DEFAULT_MAX_STEPS,
   permission: mergeAgentPermissions(
     basePermissions,
     [
@@ -194,10 +194,10 @@ export const scoutAgent: AgentInfo = {
 
 export const reviewAgent: AgentInfo = {
   name: 'review',
-  mode: 'primary',
-  description: 'Code review specialist. Analyzes code quality, security vulnerabilities, performance issues, and architectural problems. Read-only with optional web search for security advisories.',
+  mode: 'subagent',
+  description: 'Code review specialist. Analyzes code quality, security vulnerabilities, performance issues, and architectural problems. Read-only for files, with diagnostic shell and subtask support.',
   systemPrompt: REVIEW_SYSTEM_PROMPT,
-  maxSteps: 50, // Focused review sessions
+  maxSteps: DEFAULT_MAX_STEPS,
   permission: mergeAgentPermissions(
     basePermissions,
     [
@@ -212,8 +212,15 @@ export const reviewAgent: AgentInfo = {
       permissionRule('workspace.apply_patch', 'deny'),
       permissionRule('workspace.edit', 'deny'),
       permissionRule('workspace.write', 'deny'),
-      permissionRule('workspace.shell', 'deny'),
-      permissionRule('task.run', 'deny'),
+      // Diagnostic commands are allowed with confirmation; file changes remain denied.
+      permissionRule('workspace.shell', 'ask'),
+      permissionRule('task.run', 'allow'),
+      permissionRule('workspace.shell', 'deny', 'rm *'),
+      permissionRule('workspace.shell', 'deny', 'rm -rf *'),
+      permissionRule('workspace.shell', 'deny', 'git reset --hard*'),
+      permissionRule('workspace.shell', 'deny', 'git clean *'),
+      permissionRule('workspace.shell', 'deny', 'git push --force*'),
+      permissionRule('workspace.shell', 'deny', 'dd if=*'),
       // Optional web access for security research
       permissionRule('web.fetch', 'ask'),
       permissionRule('web.search', 'ask'),
@@ -226,10 +233,10 @@ export const reviewAgent: AgentInfo = {
 
 export const refactorAgent: AgentInfo = {
   name: 'refactor',
-  mode: 'primary',
+  mode: 'subagent',
   description: 'Safe refactoring specialist. Performs intelligent, incremental refactoring with comprehensive impact analysis. Always analyzes before modifying.',
   systemPrompt: REFACTOR_SYSTEM_PROMPT,
-  maxSteps: 100, // Refactoring can take more steps
+  maxSteps: DEFAULT_MAX_STEPS,
   permission: mergeAgentPermissions(
     basePermissions,
     [
@@ -264,10 +271,10 @@ export const refactorAgent: AgentInfo = {
 
 export const testAgent: AgentInfo = {
   name: 'test',
-  mode: 'primary',
+  mode: 'subagent',
   description: 'Test generation specialist. Analyzes code and generates comprehensive test cases with high coverage. Supports unit tests, integration tests, and edge cases.',
   systemPrompt: TEST_SYSTEM_PROMPT,
-  maxSteps: 80, // Test generation is focused
+  maxSteps: DEFAULT_MAX_STEPS,
   permission: mergeAgentPermissions(
     basePermissions,
     [
@@ -302,10 +309,10 @@ export const testAgent: AgentInfo = {
 
 export const docAgent: AgentInfo = {
   name: 'doc',
-  mode: 'primary',
+  mode: 'subagent',
   description: 'Documentation specialist. Generates API docs, README files, architecture documentation, and code comments. Keeps docs in sync with code.',
   systemPrompt: DOC_SYSTEM_PROMPT,
-  maxSteps: 60, // Documentation is focused
+  maxSteps: DEFAULT_MAX_STEPS,
   permission: mergeAgentPermissions(
     basePermissions,
     [
@@ -334,10 +341,10 @@ export const docAgent: AgentInfo = {
 
 export const debugAgent: AgentInfo = {
   name: 'debug',
-  mode: 'primary',
+  mode: 'subagent',
   description: 'Debugging specialist. Diagnoses errors, traces root causes, and suggests verified fixes. Analyzes call chains and provides actionable solutions.',
   systemPrompt: DEBUG_SYSTEM_PROMPT,
-  maxSteps: 70, // Debugging can take multiple steps
+  maxSteps: DEFAULT_MAX_STEPS,
   permission: mergeAgentPermissions(
     basePermissions,
     [

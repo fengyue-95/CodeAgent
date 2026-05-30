@@ -207,6 +207,26 @@ export class SqliteSessionStore {
     return this.getMessage(id);
   }
 
+  updateMessageMetadata(id: string, metadata: Record<string, unknown>): SessionMessage | null {
+    const now = Date.now();
+    const message = this.getMessage(id);
+    if (!message) {
+      return null;
+    }
+
+    const next = {
+      ...message.metadata,
+      ...metadata,
+    };
+    this.db.prepare(`
+      UPDATE messages
+      SET metadata = ?
+      WHERE id = ?
+    `).run(toJson(next), id);
+    this.touchSession(message.sessionId, now);
+    return this.getMessage(id);
+  }
+
   getMessage(id: string): SessionMessage | null {
     const row = this.db.prepare('SELECT * FROM messages WHERE id = ?').get(id);
     return row ? rowToMessage(row) : null;

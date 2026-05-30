@@ -29,6 +29,7 @@ export interface AgentRuntimeInput {
   model?: string;
   title?: string;
   maxSteps?: number;
+  autoExtendSteps?: boolean;
   temperature?: number;
   toolMode?: LocalToolMode;
   mcpEnabled?: boolean;
@@ -47,19 +48,25 @@ export interface AgentRuntimeResult {
   status: 'completed' | 'failed';
 }
 
+export type AgentRuntimeEventSource = {
+  source?: 'subtask';
+  taskDescription?: string;
+  depth?: number;
+};
+
 export type AgentRuntimeEvent =
-  | { type: 'step-start'; step: number; maxSteps: number }
-  | { type: 'assistant-text-delta'; step: number; text: string }
-  | { type: 'assistant-text'; step: number; text: string }
-  | { type: 'tool-call-start'; step: number; callId: string; tool: string }
-  | { type: 'tool-call-delta'; step: number; callId?: string; tool?: string; argumentsDelta: string }
-  | { type: 'tool-call'; step: number; callId: string; tool: string; input: Record<string, unknown> }
-  | { type: 'permission-request'; step: number; request: AgentPermissionRequest }
-  | { type: 'permission-result'; step: number; request: AgentPermissionRequest; approved: boolean }
-  | { type: 'tool-result'; step: number; callId: string; tool: string; output: string }
-  | { type: 'tool-error'; step: number; callId: string; tool: string; error: string }
-  | { type: 'step-finish'; step: number; reason?: string }
-  | { type: 'runtime-error'; error: string; errorObject?: unknown };
+  | ({ type: 'step-start'; step: number; maxSteps: number } & AgentRuntimeEventSource)
+  | ({ type: 'assistant-text-delta'; step: number; text: string } & AgentRuntimeEventSource)
+  | ({ type: 'assistant-text'; step: number; text: string } & AgentRuntimeEventSource)
+  | ({ type: 'tool-call-start'; step: number; callId: string; tool: string } & AgentRuntimeEventSource)
+  | ({ type: 'tool-call-delta'; step: number; callId?: string; tool?: string; argumentsDelta: string } & AgentRuntimeEventSource)
+  | ({ type: 'tool-call'; step: number; callId: string; tool: string; input: Record<string, unknown> } & AgentRuntimeEventSource)
+  | ({ type: 'permission-request'; step: number; request: AgentPermissionRequest } & AgentRuntimeEventSource)
+  | ({ type: 'permission-result'; step: number; request: AgentPermissionRequest; approved: boolean } & AgentRuntimeEventSource)
+  | ({ type: 'tool-result'; step: number; callId: string; tool: string; output: string } & AgentRuntimeEventSource)
+  | ({ type: 'tool-error'; step: number; callId: string; tool: string; error: string } & AgentRuntimeEventSource)
+  | ({ type: 'step-finish'; step: number; reason?: string } & AgentRuntimeEventSource)
+  | ({ type: 'runtime-error'; error: string; errorObject?: unknown } & AgentRuntimeEventSource);
 
 export interface AgentPermissionRequest {
   sessionId: string;
@@ -267,43 +274,6 @@ export class AgentRuntime {
         });
       }
 
-      // 达到步骤限制时询问是否继续
-      if (step === maxSteps - 1) {
-        await this.emit(context.input, {
-          type: 'runtime-error',
-          error: `⚠️  已达到步骤限制 (${maxSteps} 步)`,
-        });
-
-        // 如果有权限请求回调，询问用户是否继续
-        if (context.input.onPermissionRequest) {
-          const shouldContinue = await context.input.onPermissionRequest({
-            sessionId: context.session.id,
-            runId: context.runId,
-            permissionId: `continue-${step}`,
-            toolCallId: 'system',
-            tool: 'system',
-            permission: 'continue',
-            pattern: 'extend-steps',
-            input: { currentSteps: maxSteps, proposedExtension: 50 },
-          });
-
-          if (shouldContinue) {
-            maxSteps += 50; // 增加 50 步
-            await this.emit(context.input, {
-              type: 'runtime-error',
-              error: `✓ 继续执行，新的步骤限制: ${maxSteps}`,
-            });
-            // 继续循环
-          } else {
-            // 用户拒绝继续，结束循环
-            break;
-          }
-        } else {
-          // 没有回调，直接结束
-          break;
-        }
-      }
-
       context.sessions.incrementRunSteps(context.runId);
       const assistant = context.sessions.createMessage({
         sessionId: context.session.id,
@@ -343,7 +313,41 @@ export class AgentRuntime {
           step: step + 1,
           reason: streamResult.finishReason,
         });
-        return assistant;
+        const shouldContinueLoop =
+          streamResult.finishReason === 'length' ||
+          streamResult.finishReason === 'tool_calls';
+        if (!shouldContinueLoop) {
+          return assistant;
+        }
+
+        const isLastAllowedStep = step === maxSteps - 1;
+        if (!isLastAllowedStep) {
+          continue;
+        }
+
+        await this.emit(context.input, {
+          type: 'runtime-error',
+          error: `⚠️  已达到步骤限制 (${maxSteps} 步)`,
+        });
+
+        const shouldContinue = await this.requestStepExtension(
+          context.input,
+          context.session.id,
+          context.runId,
+          step + 1,
+          maxSteps
+        );
+
+        if (!shouldContinue) {
+          break;
+        }
+
+        maxSteps += 50;
+        await this.emit(context.input, {
+          type: 'runtime-error',
+          error: `✓ 继续执行，新的步骤限制: ${maxSteps}`,
+        });
+        continue;
       }
 
       for (const call of toolCalls) {
@@ -520,9 +524,71 @@ export class AgentRuntime {
         step: step + 1,
         reason: streamResult.finishReason,
       });
+
+      const needsAnotherStep =
+        streamResult.finishReason === 'length' ||
+        streamResult.finishReason === 'tool_calls';
+      if (!needsAnotherStep) {
+        return assistant;
+      }
+
+      const isLastAllowedStep = step === maxSteps - 1;
+      if (!isLastAllowedStep) {
+        continue;
+      }
+
+      await this.emit(context.input, {
+        type: 'runtime-error',
+        error: `⚠️  已达到步骤限制 (${maxSteps} 步)`,
+      });
+
+      const shouldContinue = await this.requestStepExtension(
+        context.input,
+        context.session.id,
+        context.runId,
+        step + 1,
+        maxSteps
+      );
+
+      if (!shouldContinue) {
+        break;
+      }
+
+      maxSteps += 50;
+      await this.emit(context.input, {
+        type: 'runtime-error',
+        error: `✓ 继续执行，新的步骤限制: ${maxSteps}`,
+      });
     }
 
     throw new Error(`Agent reached max steps (${maxSteps})`);
+  }
+
+  private async requestStepExtension(
+    input: AgentRuntimeInput,
+    sessionId: string,
+    runId: string,
+    step: number,
+    currentSteps: number
+  ): Promise<boolean> {
+    if (input.autoExtendSteps) {
+      return true;
+    }
+
+    if (!input.onPermissionRequest) {
+      return false;
+    }
+
+    return input.onPermissionRequest({
+      sessionId,
+      runId,
+      permissionId: `continue-${step}`,
+      toolCallId: 'system',
+      tool: 'system',
+      permission: 'continue',
+      pattern: 'extend-steps',
+      input: { currentSteps, proposedExtension: 50 },
+    });
   }
 
   private async processProviderStream(input: {
@@ -545,10 +611,13 @@ export class AgentRuntime {
     for await (const event of input.context.input.provider.stream({
       model: input.context.input.model,
       temperature: input.context.input.temperature,
-      messages: this.providerMessages(
+      messages: await this.providerMessages(
         input.context.agent,
         input.context.sessions.listMessages(input.context.session.id),
-        input.assistantMessageId
+        input.assistantMessageId,
+        input.context.input.provider,
+        input.context.input.model,
+        input.context.sessions
       ),
       tools: input.tools.map((tool) => ({
         type: 'function',
@@ -691,9 +760,15 @@ export class AgentRuntime {
       provider: context.input.provider,
       agent: taskInput.agent ?? 'plan',
       model: context.input.model,
-      maxSteps: taskInput.maxSteps ?? 8,
+      maxSteps: taskInput.maxSteps ?? 50,
       temperature: context.input.temperature,
       title: taskInput.description,
+      onEvent: (event) => context.input.onEvent?.({
+        ...event,
+        source: 'subtask',
+        taskDescription: taskInput.description,
+        depth: depth + 1,
+      }),
       onPermissionRequest: context.input.onPermissionRequest,
       subTaskDepth: depth + 1,
     });
@@ -707,28 +782,93 @@ export class AgentRuntime {
     };
   }
 
-  private providerMessages(agent: AgentInfo, timeline: SessionMessageWithParts[], excludeMessageId?: string): ProviderMessage[] {
+  private async providerMessages(
+    agent: AgentInfo,
+    timeline: SessionMessageWithParts[],
+    excludeMessageId: string | undefined,
+    provider: ProviderClient,
+    model: string | undefined,
+    sessions: SqliteSessionStore
+  ): Promise<ProviderMessage[]> {
     // 过滤掉排除的消息
     const filteredTimeline = timeline.filter(
       item => item.message.id !== excludeMessageId
     );
 
     // 使用上下文压缩器
+    const systemPrompt = withLanguagePreference(agent.systemPrompt, filteredTimeline);
     const compressor = new ContextCompressor({
       maxTokens: 100000,
       keepRecentCount: 10,
       enableCompression: true,
+      provider,
+      model,
+      onSummary: (summary) => {
+        const target = contextSummaryTarget(filteredTimeline);
+        target.message.metadata = {
+          ...target.message.metadata,
+          compactionSummary: summary,
+        };
+        sessions.updateMessageMetadata(target.message.id, {
+          compactionSummary: summary,
+        });
+      },
     });
 
     // 获取压缩统计（可选，用于调试）
-    const stats = compressor.getStats(agent.systemPrompt, filteredTimeline);
-    if (stats.needsCompression) {
+    const stats = compressor.getStats(systemPrompt, filteredTimeline);
+    if (stats.needsCompression && process.env.CODE_AGENT_DEBUG_COMPRESSION === '1') {
       console.error(`[Context Compression] Total: ${stats.totalMessages} messages, ${stats.totalTokens} tokens, compression ratio: ${(stats.compressionRatio ?? 0).toFixed(2)}`);
     }
 
-    return compressor.compress(agent.systemPrompt, filteredTimeline);
+    return compressor.compress(systemPrompt, filteredTimeline);
   }
 
+}
+
+function withLanguagePreference(systemPrompt: string, timeline: SessionMessageWithParts[]): string {
+  const taskText = latestUserText(timeline);
+  const language = detectTaskLanguage(taskText);
+  return [
+    systemPrompt,
+    '',
+    '## Response Language',
+    'Default to responding in the same language as the user task unless the user explicitly requests another language.',
+    `Detected task language: ${language}.`,
+  ].join('\n');
+}
+
+function latestUserText(timeline: SessionMessageWithParts[]): string {
+  const latest = [...timeline].reverse().find((item) => item.message.role === 'user');
+  if (!latest) {
+    return '';
+  }
+  return latest.parts
+    .filter((part) => part.type === 'text' || part.type === 'reasoning')
+    .map((part) => part.text)
+    .join('\n');
+}
+
+function detectTaskLanguage(text: string): 'Chinese' | 'English' | 'mixed/unknown' {
+  const chineseChars = (text.match(/[\u4e00-\u9fff]/g) ?? []).length;
+  const latinChars = (text.match(/[A-Za-z]/g) ?? []).length;
+  if (chineseChars > 0 && chineseChars >= latinChars * 0.25) {
+    return 'Chinese';
+  }
+  if (latinChars > 0) {
+    return 'English';
+  }
+  return 'mixed/unknown';
+}
+
+function contextSummaryTarget(timeline: SessionMessageWithParts[]): SessionMessageWithParts {
+  for (let index = timeline.length - 1; index >= 0; index -= 1) {
+    const item = timeline[index];
+    if (item?.message.role === 'assistant') {
+      return item;
+    }
+  }
+  return timeline[timeline.length - 1]!;
 }
 
 function stringifyToolOutput(value: unknown): string {

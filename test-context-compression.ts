@@ -44,7 +44,7 @@ const fewMessages: SessionMessageWithParts[] = [
 ];
 
 const systemPrompt1 = 'You are a helpful coding assistant.';
-const result1 = compressor1.compress(systemPrompt1, fewMessages);
+const result1 = await compressor1.compress(systemPrompt1, fewMessages);
 const stats1 = compressor1.getStats(systemPrompt1, fewMessages);
 
 console.log('消息数量:', fewMessages.length);
@@ -72,7 +72,7 @@ for (let i = 0; i < 20; i++) {
 }
 
 const systemPrompt2 = 'You are a helpful coding assistant.';
-const result2 = compressor2.compress(systemPrompt2, manyMessages);
+const result2 = await compressor2.compress(systemPrompt2, manyMessages);
 const stats2 = compressor2.getStats(systemPrompt2, manyMessages);
 
 console.log('原始消息数量:', manyMessages.length);
@@ -97,7 +97,7 @@ const compressor3 = new ContextCompressor({
   enableCompression: false,
 });
 
-const result3 = compressor3.compress(systemPrompt2, manyMessages);
+const result3 = await compressor3.compress(systemPrompt2, manyMessages);
 console.log('原始消息数量:', manyMessages.length);
 console.log('禁用压缩后消息数量:', result3.length);
 console.log('是否包含所有消息:', result3.length === manyMessages.length + 1); // +1 for system

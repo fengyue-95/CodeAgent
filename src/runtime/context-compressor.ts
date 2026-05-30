@@ -1,11 +1,52 @@
-import { ProviderMessage } from '../provider';
+import { ProviderClient, ProviderMessage } from '../provider';
 import { SessionMessageWithParts, TextSessionPart, ReasoningSessionPart, ToolSessionPart } from '../session';
 
 export interface ContextCompressorOptions {
   maxTokens?: number;
   keepRecentCount?: number;
   enableCompression?: boolean;
+  provider?: ProviderClient;
+  model?: string;
+  summaryMaxTokens?: number;
+  onSummary?: (summary: string) => void | Promise<void>;
 }
+
+const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <template> and keep the section order unchanged. Do not include the <template> tags in your response.
+<template>
+## Goal
+- [single-sentence task summary]
+
+## Constraints & Preferences
+- [user constraints, preferences, specs, or "(none)"]
+
+## Progress
+### Done
+- [completed work or "(none)"]
+
+### In Progress
+- [current work or "(none)"]
+
+### Blocked
+- [blockers or "(none)"]
+
+## Key Decisions
+- [decision and why, or "(none)"]
+
+## Next Steps
+- [ordered next actions or "(none)"]
+
+## Critical Context
+- [important technical facts, errors, open questions, or "(none)"]
+
+## Relevant Files
+- [file or directory path: why it matters, or "(none)"]
+</template>
+
+Rules:
+- Keep every section, even when empty.
+- Use terse bullets, not prose paragraphs.
+- Preserve exact file paths, commands, error strings, and identifiers when known.
+- Do not mention the summary process or that context was compacted.`;
 
 /**
  * 上下文压缩器
@@ -21,11 +62,19 @@ export class ContextCompressor {
   private readonly maxTokens: number;
   private readonly keepRecentCount: number;
   private readonly enableCompression: boolean;
+  private readonly provider?: ProviderClient;
+  private readonly model?: string;
+  private readonly summaryMaxTokens: number;
+  private readonly onSummary?: (summary: string) => void | Promise<void>;
 
   constructor(options: ContextCompressorOptions = {}) {
     this.maxTokens = options.maxTokens ?? 100000;
     this.keepRecentCount = options.keepRecentCount ?? 10;
     this.enableCompression = options.enableCompression ?? true;
+    this.provider = options.provider;
+    this.model = options.model;
+    this.summaryMaxTokens = options.summaryMaxTokens ?? 2000;
+    this.onSummary = options.onSummary;
   }
 
   /**
@@ -35,21 +84,16 @@ export class ContextCompressor {
    * @param timeline - 完整的消息历史
    * @returns 压缩后的消息列表
    */
-  compress(
+  async compress(
     systemPrompt: string,
     timeline: SessionMessageWithParts[]
-  ): ProviderMessage[] {
+  ): Promise<ProviderMessage[]> {
     const messages: ProviderMessage[] = [
       { role: 'system', content: systemPrompt }
     ];
 
     // 如果禁用压缩，直接返回所有消息
     if (!this.enableCompression) {
-      return this.addAllMessages(messages, timeline);
-    }
-
-    // 如果消息不多，直接返回
-    if (timeline.length <= this.keepRecentCount) {
       return this.addAllMessages(messages, timeline);
     }
 
@@ -64,16 +108,19 @@ export class ContextCompressor {
     }
 
     // 需要压缩：分割早期消息和最近消息
-    const recentMessages = timeline.slice(-this.keepRecentCount);
-    const oldMessages = timeline.slice(0, -this.keepRecentCount);
+    const recentCount = Math.min(this.keepRecentCount, Math.max(0, timeline.length - 1));
+    const recentMessages = recentCount > 0 ? timeline.slice(-recentCount) : [];
+    const oldMessages = timeline.slice(0, timeline.length - recentCount);
+    const previousSummary = this.findPreviousSummary(oldMessages);
+    if (previousSummary && this.summaryWithTailFits(systemPrompt, previousSummary, recentMessages)) {
+      messages.push(this.summaryMessage(previousSummary));
+      return this.addAllMessages(messages, recentMessages);
+    }
 
     // 压缩早期消息
-    const summary = this.summarizeOldMessages(oldMessages);
+    const summary = await this.summarizeOldMessages(oldMessages);
     if (summary) {
-      messages.push({
-        role: 'system',
-        content: `## Previous Conversation Summary\n\n${summary}\n\n---\n\nThe following messages are the most recent conversation:`
-      });
+      messages.push(this.summaryMessage(summary));
     }
 
     // 添加最近消息（完整）
@@ -83,9 +130,17 @@ export class ContextCompressor {
   /**
    * 压缩早期消息为摘要
    */
-  private summarizeOldMessages(messages: SessionMessageWithParts[]): string {
+  private async summarizeOldMessages(messages: SessionMessageWithParts[]): Promise<string> {
     if (messages.length === 0) {
       return '';
+    }
+
+    if (this.provider) {
+      const generated = await this.generateSummary(messages);
+      if (generated) {
+        await this.onSummary?.(generated);
+        return generated;
+      }
     }
 
     const sections: string[] = [];
@@ -145,6 +200,70 @@ export class ContextCompressor {
     return sections.join('\n\n');
   }
 
+  private async generateSummary(messages: SessionMessageWithParts[]): Promise<string | undefined> {
+    const previousSummary = this.findPreviousSummary(messages);
+    const history = this.addAllMessages([], messages);
+    const prompt = this.buildSummaryPrompt(previousSummary);
+    const response = await this.provider?.generate({
+      model: this.model,
+      temperature: 0,
+      maxTokens: this.summaryMaxTokens,
+      tools: [],
+      toolChoice: 'none',
+      messages: [
+        ...history,
+        {
+          role: 'user',
+          content: prompt,
+        },
+      ],
+    });
+    const summary = response?.choices[0]?.message.content?.trim();
+    return summary || undefined;
+  }
+
+  private buildSummaryPrompt(previousSummary: string | undefined): string {
+    const anchor = previousSummary
+      ? [
+        'Update the anchored summary below using the conversation history above.',
+        'Preserve still-true details, remove stale details, and merge in the new facts.',
+        '<previous-summary>',
+        previousSummary,
+        '</previous-summary>',
+      ].join('\n')
+      : 'Create a new anchored summary from the conversation history above.';
+    return [anchor, SUMMARY_TEMPLATE].join('\n\n');
+  }
+
+  private findPreviousSummary(messages: SessionMessageWithParts[]): string | undefined {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const summary = messages[index]?.message.metadata?.compactionSummary;
+      if (typeof summary === 'string' && summary.trim()) {
+        return summary;
+      }
+    }
+    return undefined;
+  }
+
+  private summaryMessage(summary: string): ProviderMessage {
+    return {
+      role: 'system',
+      content: `## Previous Conversation Summary\n\n${summary}\n\n---\n\nThe following messages are the most recent conversation:`,
+    };
+  }
+
+  private summaryWithTailFits(
+    systemPrompt: string,
+    summary: string,
+    recentMessages: SessionMessageWithParts[]
+  ): boolean {
+    const totalTokens =
+      this.estimateTokens(systemPrompt) +
+      this.estimateTokens(summary) +
+      this.estimateTimelineTokens(recentMessages);
+    return totalTokens < this.maxTokens * 0.8;
+  }
+
   /**
    * 提取消息中的文本内容
    */
@@ -164,7 +283,12 @@ export class ContextCompressor {
     timeline: SessionMessageWithParts[]
   ): ProviderMessage[] {
     for (const item of timeline) {
-      messages.push(this.messageToProviderMessage(item));
+      const providerMessage = this.messageToProviderMessage(item);
+      const hasContent = typeof providerMessage.content === 'string' && providerMessage.content.length > 0;
+      const hasToolCalls = (providerMessage.toolCalls?.length ?? 0) > 0;
+      if (hasContent || hasToolCalls || providerMessage.role === 'user') {
+        messages.push(providerMessage);
+      }
 
       // 添加工具结果
       for (const part of item.parts) {

@@ -7,7 +7,7 @@ CodeAgent 是一个基于 AI 的代码助手，提供代码图谱分析、智能
 ## ✨ 核心特性
 
 - 🔍 **代码图谱** - 基于 Tree-sitter 的深度代码分析
-- 🤖 **10 个专业 Agent** - 针对不同任务优化的 AI 助手
+- 🤖 **2 个主模式 + 8 个 subagent** - 主会话保持简单，专项任务由模型自动分派
 - 📊 **依赖分析** - 可视化依赖关系和影响分析
 - 🔧 **MCP 插拔系统** - 动态加载/卸载 MCP 服务，扩展工具能力
 - 💬 **交互式 TUI** - 强大的终端用户界面
@@ -46,60 +46,61 @@ code-agent run "查看礼品卡的设计"
 code-agent
 ```
 
+默认情况下，模型输出语言会跟随本次任务输入语言；例如你用中文提问就默认中文回复，用英文提问就默认英文回复，除非任务里明确指定其它语言。
+
 ## 🤖 Agent 模式
 
-CodeAgent 提供 **10 个专业化 Agent**，每个针对特定任务优化：
+CodeAgent 采用 **2 个主模式 + 多个 subagent** 的结构：
 
-### 核心 Agent (5个)
+- **主模式（primary）**：用户直接驾驶的长期会话模式，目前只有 `build` 和 `plan`
+- **subagent**：由主模型通过 `task` 工具按需调度的专项 agent，例如探索代码、审查风险、诊断问题、生成测试等
 
-| Agent | 用途 | 权限 | 步骤 |
-|-------|------|------|------|
-| **build** | 默认开发模式 | 读写执行 | 100 |
-| **plan** | 只读规划 | 只读 | 100 |
-| **general** | 通用多步骤任务 | 全权限 | 100 |
-| **explore** | 快速代码库探索 | 只读 | 50 |
-| **scout** | 外部文档研究 | 只读+Web | 50 |
+这种设计让 TUI 保持简单：你只需要在 `build` 和 `plan` 之间切换；复杂任务由模型自行拆分并调用合适的 subagent。
 
-### 专业 Agent (5个) ⭐
+### 主模式 Agent
 
 | Agent | 用途 | 权限 | 步骤 |
 |-------|------|------|------|
-| **review** 🔍 | 代码审查专家 | 只读+图谱 | 50 |
-| **refactor** ♻️ | 代码重构专家 | 读写需确认 | 100 |
-| **test** 🧪 | 测试生成专家 | 可写测试 | 80 |
-| **doc** 📚 | 文档生成专家 | 可写文档 | 60 |
-| **debug** 🐛 | 问题诊断专家 | 读+修复需确认 | 70 |
+| **build** | 默认开发模式，执行修改并进行验证闭环 | 读写执行 | 200 |
+| **plan** | 只读规划 | 只读 | 200 |
 
-### 快速选择指南
+### Subagent
+
+| Agent | 用途 | 权限 | 步骤 |
+|-------|------|------|------|
+| **general** | 通用多步骤调查 | 全权限 | 200 |
+| **explore** | 快速代码库探索 | 只读 | 200 |
+| **scout** | 外部文档和依赖研究 | 只读+Web | 200 |
+| **review** | 代码审查、风险分析 | 只读+诊断 shell 需确认 | 200 |
+| **refactor** | 重构分析和执行 | 读写需确认 | 200 |
+| **test** | 测试规划/生成 | 可写测试 | 200 |
+| **doc** | 文档生成和整理 | 可写文档 | 200 |
+| **debug** | 问题诊断和根因分析 | 读+诊断 shell | 200 |
+
+### Subagent 调度
+
+subagent 不是 TUI 主模式，不通过 `/tab` 手动切换。主 agent 会在需要时调用 `task` 工具调度它们：
+
+- `explore`：找文件、搜符号、理解模块结构
+- `scout`：查外部文档、依赖源码、官方示例
+- `review`：审查 diff/模块，输出 bug、风险和缺失测试
+- `debug`：复现问题、运行诊断命令、定位根因
+- `test`：规划或生成测试
+- `doc`：生成 README、接口文档、设计说明
+- `refactor`：分析和执行局部重构
+- `general`：宽泛的多步骤调查
+
+示例：
 
 ```bash
-# 代码审查
-code-agent run "审查 src/user/service.ts" --agent review
-
-# 代码重构
-code-agent run "重构 UserService.authenticate" --agent refactor
-
-# 生成测试
-code-agent run "为 AuthService 生成测试" --agent test
-
-# 生成文档
-code-agent run "为 AuthService 生成 API 文档" --agent doc
-
-# 问题诊断
-code-agent run "诊断登录失败错误" --agent debug
-
-# 实现功能
+# 实现功能时，build 可自行调用 review/test/doc/debug 等 subagent
 code-agent run "实现用户认证" --agent build --tools full
 
-# 规划方案
+# 规划方案时，plan 可进行只读分析
 code-agent run "规划认证功能实现" --agent plan
-
-# 理解代码
-code-agent run "探索支付模块实现" --agent explore
-
-# 调研技术
-code-agent run "调研 Redis 缓存方案" --agent scout
 ```
+
+build 模式在修改代码后会尽量运行最相关的编译、类型检查或测试命令；如果验证失败，会根据错误输出继续做最小修复并再次验证。若无法验证或验证仍未通过，它会明确说明剩余风险，而不是直接宣称完成。
 
 ### 完整工作流示例
 
@@ -109,49 +110,22 @@ code-agent run "调研 Redis 缓存方案" --agent scout
 # 1. 规划
 code-agent run "规划用户认证功能" --agent plan
 
-# 2. 实现
+# 2. 实现；模型可按需调用 review/test/doc/debug subagent
 code-agent run "实现用户认证" --agent build --tools full
-
-# 3. 审查
-code-agent run "审查认证代码" --agent review
-
-# 4. 生成测试
-code-agent run "为 AuthService 生成测试" --agent test
-
-# 5. 生成文档
-code-agent run "为 AuthService 生成文档" --agent doc
 ```
 
 #### Bug 修复
 
 ```bash
-# 1. 诊断
-code-agent run "诊断登录失败错误" --agent debug
-
-# 2. 修复
+# build 会先诊断，再修复；需要时可调用 debug/test/review subagent
 code-agent run "修复空指针问题" --agent build --tools full
-
-# 3. 添加测试
-code-agent run "添加回归测试" --agent test
-
-# 4. 审查
-code-agent run "审查修复代码" --agent review
 ```
 
 #### 代码质量提升
 
 ```bash
-# 1. 审查
-code-agent run "审查 src/user/ 代码质量" --agent review
-
-# 2. 重构
-code-agent run "重构复杂方法" --agent refactor
-
-# 3. 提高覆盖率
-code-agent run "提高测试覆盖率" --agent test
-
-# 4. 更新文档
-code-agent run "更新文档" --agent doc
+# build 可调度 review/refactor/test/doc subagent 完成分工
+code-agent run "提升 src/user/ 代码质量，包含审查、重构建议、测试和文档更新" --agent build --tools full
 ```
 
 ## 💬 TUI 交互模式
@@ -163,19 +137,16 @@ code-agent
 # 或
 code-agent tui
 code-agent tui --continue
-code-agent tui --agent review
+code-agent tui --agent plan
 ```
 
-### 在 TUI 中切换 Agent
+### 在 TUI 中切换主模式
 
 #### 方式 1: 使用命令
 
 ```bash
-/agent review      # 切换到 review agent
-/agent refactor    # 切换到 refactor agent
-/agent test        # 切换到 test agent
-/agent doc         # 切换到 doc agent
-/agent debug       # 切换到 debug agent
+/agent build       # 切换到 build 主模式
+/agent plan        # 切换到 plan 主模式
 /agent             # 查看当前 agent
 ```
 
@@ -183,15 +154,15 @@ code-agent tui --agent review
 
 在空提示符下按 **Tab** 键循环切换：
 ```
-build → plan → general → explore → scout → review → refactor → test → doc → debug → build ...
+build → plan → build ...
 ```
 
 ### TUI 常用命令
 
 ```text
 /help                    查看帮助
-/agent <name>            切换 agent
-/tab                     循环切换 agent
+/agent <name>            切换主模式（build/plan）
+/tab                     在 build/plan 间循环切换
 /tools core|full         切换工具集
 /model <name>            切换模型
 /max-steps <n>           设置最大步骤
@@ -212,7 +183,7 @@ build → plan → general → explore → scout → review → refactor → tes
 @file:GiftCard           模糊查找文件
 @src/path/file.ts        附加文件内容
 !npm test                执行 shell 命令并附加输出
-Tab (空提示符)           循环切换 agent
+Tab (空提示符)           在 build/plan 间循环切换
 ```
 
 ### TUI 使用示例
@@ -222,19 +193,10 @@ Tab (空提示符)           循环切换 agent
 code-agent
 
 # 在 TUI 中：
-code-agent build/core > /agent review
-code-agent review/core > 审查 src/user/service.ts
-
-code-agent review/core > /agent refactor
-code-agent refactor/core > 重构 UserService.authenticate
-
-code-agent refactor/core > /agent test
-code-agent test/core > 为 AuthService 生成测试
-
-code-agent test/core > /agent doc
-code-agent doc/core > 为 AuthService 生成文档
-
-code-agent doc/core > /exit
+code-agent build/core > 实现用户认证，并在完成后审查风险、补充测试和文档
+code-agent build/core > /agent plan
+code-agent plan/core > 分析支付模块结构并给出实施计划
+code-agent plan/core > /exit
 ```
 
 ## 🛠️ run 命令
@@ -243,7 +205,6 @@ code-agent doc/core > /exit
 
 ```bash
 code-agent run "查看礼品卡的设计"
-code-agent run "审查 src/user/service.ts" --agent review
 code-agent run "修复测试失败" --agent build --tools full
 ```
 
@@ -372,7 +333,7 @@ permissionRule('mcp.postgres.query', 'ask')
 ### 常用参数
 
 ```bash
---agent <name>              Agent 模式（10 个可选）
+--agent <name>              Agent 名称，主会话推荐 build 或 plan
 --tools <core|full>         工具集，默认 core
 --model <model>             模型覆盖
 --max-steps <n>             最大步骤数
@@ -385,17 +346,11 @@ permissionRule('mcp.postgres.query', 'ask')
 ### 使用示例
 
 ```bash
-# 只读分析（core 模式）
-code-agent run "分析礼品卡设计" --agent explore
-
-# 代码审查（只读）
-code-agent run "审查 src/user/" --agent review
+# 只读规划（core 模式）
+code-agent run "分析礼品卡设计" --agent plan
 
 # 修改代码（需要 full 模式）
 code-agent run "修复 bug" --agent build --tools full
-
-# 生成测试（可写测试文件）
-code-agent run "为 AuthService 生成测试" --agent test
 
 # 继续会话
 code-agent run "继续分析" --continue
@@ -597,7 +552,7 @@ npm run test:ui
 ### 核心文档
 
 - [架构设计](docs/architecture.md) - 系统架构、模块设计、数据流
-- [Agent 设计](docs/AGENT_DESIGN.md) - 10 个 Agent 的完整设计
+- [Agent 设计](docs/AGENT_DESIGN.md) - 主模式和 subagent 的完整设计
 - [图谱模型](docs/graph-schema.md) - 代码图谱数据模型和查询
 - [工具开发](docs/tool-development.md) - 自定义工具开发指南
 - [贡献指南](CONTRIBUTING.md) - 如何为项目做贡献

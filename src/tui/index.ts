@@ -47,7 +47,8 @@ const HELP_TEXT = [
   '  /new [title]             Start a new session',
   '  /sessions                List sessions and switch',
   '  /agent [name]            Show or change agent',
-  '    Available: build, plan, general, explore, scout, review, refactor, test, doc, debug',
+  '    Primary modes: build, plan',
+  '    Other agents are available to the task tool as subagents.',
   '  /tab                     Cycle agent, same as pressing Tab on an empty prompt',
   '  /tools [core|full]       Show or change tool set',
   '  /model [name]            Show or change model override',
@@ -382,9 +383,10 @@ async function runPrompt(prompt: string, state: TuiState, rl: Interface): Promis
 }
 
 function printTuiEvent(event: AgentRuntimeEvent, state: TuiState): void {
+  const prefix = formatTuiEventPrefix(event);
   if (event.type === 'step-start') {
     closeTextLine();
-    console.log(`\n${badge('step', 'cyan')} ${bold(`${event.step}/${event.maxSteps}`)}`);
+    console.log(`\n${badge(`${prefix}step`, 'cyan')} ${bold(`${event.step}/${event.maxSteps}`)}`);
     return;
   }
 
@@ -396,7 +398,7 @@ function printTuiEvent(event: AgentRuntimeEvent, state: TuiState): void {
 
   if (event.type === 'tool-call-start') {
     closeTextLine();
-    console.log(`${badge('tool', 'magenta')} ${event.tool} ${dim('input')}`);
+    console.log(`${badge(`${prefix}tool`, 'magenta')} ${event.tool} ${dim('input')}`);
     return;
   }
 
@@ -405,19 +407,19 @@ function printTuiEvent(event: AgentRuntimeEvent, state: TuiState): void {
     // 对于某些工具，默认显示输入
     const shouldShowInput = ['todowrite', 'plan', 'task'].includes(event.tool) || state.showDetails;
     const suffix = shouldShowInput ? ` ${truncate(JSON.stringify(event.input), 500)}` : '';
-    console.log(`${badge('tool', 'magenta')} ${event.tool} ${dim('start')}${suffix}`);
+    console.log(`${badge(`${prefix}tool`, 'magenta')} ${event.tool} ${dim('start')}${suffix}`);
     return;
   }
 
   if (event.type === 'permission-request') {
     closeTextLine();
-    console.log(`${badge('permission', 'yellow')} ${event.request.permission} ${dim(event.request.pattern)}`);
+    console.log(`${badge(`${prefix}permission`, 'yellow')} ${event.request.permission} ${dim(event.request.pattern)}`);
     return;
   }
 
   if (event.type === 'permission-result') {
     closeTextLine();
-    console.log(`${badge('permission', event.approved ? 'green' : 'red')} ${event.approved ? 'approved' : 'rejected'}`);
+    console.log(`${badge(`${prefix}permission`, event.approved ? 'green' : 'red')} ${event.approved ? 'approved' : 'rejected'}`);
     return;
   }
 
@@ -436,14 +438,14 @@ function printTuiEvent(event: AgentRuntimeEvent, state: TuiState): void {
             typeof task.steps === 'number' ? `${task.steps} step(s)` : undefined,
           ].filter(Boolean).join('; ')
           : 'done';
-        console.log(`${badge('tool', 'green')} ${event.tool} ${dim(meta)}`);
+        console.log(`${badge(`${prefix}tool`, 'green')} ${event.tool} ${dim(meta)}`);
         const output = task?.output?.trim();
         if (output) {
           console.log(output);
         }
       } else {
         // todowrite, plan 等工具显示完整输出
-        console.log(`${badge('tool', 'green')} ${event.tool} ${dim('done')}`);
+        console.log(`${badge(`${prefix}tool`, 'green')} ${event.tool} ${dim('done')}`);
         const output = event.output.trim();
         if (output) {
           // 对于较长的输出，显示前 2000 字符
@@ -456,26 +458,58 @@ function printTuiEvent(event: AgentRuntimeEvent, state: TuiState): void {
 
     // 其他工具的默认处理
     const suffix = state.showDetails ? ` ${truncate(event.output.replace(/\s+/g, ' '), 700)}` : '';
-    console.log(`${badge('tool', 'green')} ${event.tool} ${dim('done')}${suffix}`);
+    console.log(`${badge(`${prefix}tool`, 'green')} ${event.tool} ${dim('done')}${suffix}`);
     return;
   }
 
   if (event.type === 'tool-error') {
     closeTextLine();
-    console.log(`${badge('tool', 'red')} ${event.tool} ${event.error}`);
+    console.log(`${badge(`${prefix}tool`, 'red')} ${event.tool} ${event.error}`);
     return;
   }
 
   if (event.type === 'step-finish') {
     closeTextLine();
-    console.log(`${badge('step', 'green')} ${event.step} ${dim(`finish${event.reason ? ` (${event.reason})` : ''}`)}`);
+    console.log(`${badge(`${prefix}step`, 'green')} ${event.step} ${dim(`finish${event.reason ? ` (${event.reason})` : ''}`)}`);
     return;
   }
 
   if (event.type === 'runtime-error') {
     closeTextLine();
-    printError(event.error);
+    printError(`${prefix}${event.error}`);
+    const details = formatProviderErrorDetails(event.errorObject);
+    if (details) {
+      console.log(details);
+    }
   }
+}
+
+function formatTuiEventPrefix(event: AgentRuntimeEvent): string {
+  if (event.source !== 'subtask') {
+    return '';
+  }
+  const description = event.taskDescription ? `${event.taskDescription} ` : '';
+  return `subtask:${description}`;
+}
+
+function formatProviderErrorDetails(errorObject: unknown): string | undefined {
+  if (
+    !errorObject ||
+    typeof errorObject !== 'object' ||
+    !('status' in errorObject) ||
+    !('responseBody' in errorObject)
+  ) {
+    return undefined;
+  }
+
+  const providerError = errorObject as { status: number; responseBody: string };
+  const lines = [`HTTP Status: ${providerError.status}`, 'API Response:'];
+  try {
+    lines.push(JSON.stringify(JSON.parse(providerError.responseBody), null, 2));
+  } catch {
+    lines.push(providerError.responseBody);
+  }
+  return lines.join('\n');
 }
 
 let textLineOpen = false;
@@ -490,6 +524,17 @@ function closeTextLine(): void {
 async function askPermission(request: AgentPermissionRequest, rl: Interface): Promise<boolean> {
   closeTextLine();
   console.log('');
+  if (request.permission === 'continue') {
+    const currentSteps = typeof request.input.currentSteps === 'number' ? request.input.currentSteps : '?';
+    const proposedExtension = typeof request.input.proposedExtension === 'number' ? request.input.proposedExtension : '?';
+    printPanel('Continue execution?', [
+      `Current max steps: ${currentSteps}`,
+      `Additional steps: +${proposedExtension}`,
+    ].join('\n'));
+    const answer = (await rl.question(`${yellow('Continue?')} ${dim('[y/N]')} `)).trim().toLowerCase();
+    return answer === 'y' || answer === 'yes';
+  }
+
   printPanel('Permission required', [
     `Tool: ${request.tool}`,
     `Permission: ${request.permission}`,
@@ -697,7 +742,7 @@ function runShell(cwd: string, command: string): Promise<{ exitCode: number; std
 }
 
 function cycleAgent(state: TuiState): void {
-  const agents: AgentName[] = ['build', 'plan', 'general', 'explore', 'scout', 'review', 'refactor', 'test', 'doc', 'debug'];
+  const agents: AgentName[] = ['build', 'plan'];
   const currentIndex = agents.indexOf(state.agent);
   const nextIndex = (currentIndex + 1) % agents.length;
   state.agent = agents[nextIndex];

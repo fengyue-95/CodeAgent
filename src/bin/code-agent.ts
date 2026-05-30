@@ -124,7 +124,8 @@ function usage(): string {
     'Run options:',
     '  --agent <build|plan>             Agent to use; default: build',
     '  --model <model>                  Provider model override',
-    '  --max-steps <n>                  Maximum agent loop steps; default: 50',
+    '  --max-steps <n>                  Maximum agent loop steps; default: 200',
+    '  --auto-extend-steps              Automatically add 50 more steps when the limit is reached',
     '  --temperature <n>                Sampling temperature',
     '  --tools <core|full>              Tool set for run; default: core',
     '  --session <sessionId>            Continue an existing session',
@@ -164,7 +165,7 @@ function usage(): string {
     '      Run the default build agent against the current project.',
     '  code-agent run "plan a session resume feature" --agent plan --max-steps 6',
     '      Use the read-only planning agent with a step limit.',
-    '  code-agent run "inspect gift card design" --max-steps 50',
+    '  code-agent run "inspect gift card design" --max-steps 200',
     '      Override the maximum agent loop steps for this run.',
     '  code-agent run "fix the failing test" --tools full',
     '      Enable editing, shell, web, todo, and subagent tools for this run.',
@@ -213,6 +214,7 @@ interface RunArgs {
   agent?: AgentName;
   model?: string;
   maxSteps?: number;
+  autoExtendSteps?: boolean;
   temperature?: number;
   toolMode?: LocalToolMode;
   sessionId?: string;
@@ -428,6 +430,7 @@ function parseRunArgs(args: string[]): RunArgs {
   let agent: AgentName | undefined;
   let model: string | undefined;
   let maxSteps: number | undefined;
+  let autoExtendSteps = false;
   let temperature: number | undefined;
   let toolMode: LocalToolMode | undefined;
   let sessionId: string | undefined;
@@ -472,6 +475,11 @@ function parseRunArgs(args: string[]): RunArgs {
 
     if (arg.startsWith('--max-steps=')) {
       maxSteps = parseLimit(arg.slice('--max-steps='.length));
+      continue;
+    }
+
+    if (arg === '--auto-extend-steps') {
+      autoExtendSteps = true;
       continue;
     }
 
@@ -577,7 +585,7 @@ function parseRunArgs(args: string[]): RunArgs {
     );
   }
 
-  return { task, projectArg, agent, model, maxSteps, temperature, toolMode, sessionId, continueLatest };
+  return { task, projectArg, agent, model, maxSteps, autoExtendSteps, temperature, toolMode, sessionId, continueLatest };
 }
 
 function parseAgentName(value: string | undefined): AgentName {
@@ -892,6 +900,7 @@ async function runAgentTask(args: string[]): Promise<void> {
   console.log(`Agent: ${options.agent ?? 'build'}`);
   console.log(`Model: ${options.model ?? provider.defaultModel}`);
   console.log(`Tools: ${options.toolMode ?? 'core'}`);
+  console.log(`Auto-extend steps: ${options.autoExtendSteps ? 'on' : 'off'}`);
   const sessionId = options.sessionId ?? (options.continueLatest ? resolveLatestSessionId(paths.dbPath) : undefined);
   if (sessionId) {
     console.log(`Session: ${sessionId}`);
@@ -907,6 +916,7 @@ async function runAgentTask(args: string[]): Promise<void> {
       agent: options.agent,
       model: options.model,
       maxSteps: options.maxSteps,
+      autoExtendSteps: options.autoExtendSteps,
       temperature: options.temperature,
       toolMode: options.toolMode,
       title: options.task,
@@ -1347,9 +1357,10 @@ function printRunResult(result: AgentRuntimeResult): void {
 let runTextLineOpen = false;
 
 function printRunEvent(event: AgentRuntimeEvent): void {
+  const prefix = formatEventPrefix(event);
   if (event.type === 'step-start') {
     closeRunTextLine();
-    console.log(`\n[step ${event.step}/${event.maxSteps}] start`);
+    console.log(`\n[${prefix}step ${event.step}/${event.maxSteps}] start`);
     return;
   }
 
@@ -1375,44 +1386,44 @@ function printRunEvent(event: AgentRuntimeEvent): void {
   if (event.type === 'tool-call') {
     closeRunTextLine();
     const toolInfo = formatToolInfo(event.tool, event.input);
-    console.log(`[tool:${event.tool}] ${toolInfo}`);
+    console.log(`[${prefix}tool:${event.tool}] ${toolInfo}`);
     return;
   }
 
   if (event.type === 'permission-request') {
     closeRunTextLine();
-    console.log(`[permission] ${event.request.permission} ${event.request.pattern}`);
+    console.log(`[${prefix}permission] ${event.request.permission} ${event.request.pattern}`);
     return;
   }
 
   if (event.type === 'permission-result') {
     closeRunTextLine();
-    console.log(`[permission] ${event.approved ? 'approved' : 'rejected'}`);
+    console.log(`[${prefix}permission] ${event.approved ? 'approved' : 'rejected'}`);
     return;
   }
 
   if (event.type === 'tool-result') {
     closeRunTextLine();
     const summary = formatToolResultSummary(event.tool, event.output);
-    console.log(`[tool:${event.tool}] ${summary}`);
+    console.log(`[${prefix}tool:${event.tool}] ${summary}`);
     return;
   }
 
   if (event.type === 'tool-error') {
     closeRunTextLine();
-    console.log(`[tool:${event.tool}] error ${event.error}`);
+    console.log(`[${prefix}tool:${event.tool}] error ${event.error}`);
     return;
   }
 
   if (event.type === 'step-finish') {
     closeRunTextLine();
-    console.log(`[step ${event.step}] finish${event.reason ? ` (${event.reason})` : ''}`);
+    console.log(`[${prefix}step ${event.step}] finish${event.reason ? ` (${event.reason})` : ''}`);
     return;
   }
 
   if (event.type === 'runtime-error') {
     closeRunTextLine();
-    console.log(`[error] ${event.error}`);
+    console.log(`[${prefix}error] ${event.error}`);
 
     // 调试：显示 errorObject 的类型和属性
     if (event.errorObject) {
@@ -1442,6 +1453,14 @@ function printRunEvent(event: AgentRuntimeEvent): void {
   }
 }
 
+function formatEventPrefix(event: AgentRuntimeEvent): string {
+  if (event.source !== 'subtask') {
+    return '';
+  }
+  const description = event.taskDescription ? `${event.taskDescription} ` : '';
+  return `subtask:${description}`;
+}
+
 function closeRunTextLine(): void {
   if (runTextLineOpen) {
     process.stdout.write('\n');
@@ -1452,6 +1471,25 @@ function closeRunTextLine(): void {
 async function askPermission(request: AgentPermissionRequest): Promise<boolean> {
   closeRunTextLine();
   console.log('');
+  if (request.permission === 'continue') {
+    const currentSteps = typeof request.input.currentSteps === 'number' ? request.input.currentSteps : '?';
+    const proposedExtension = typeof request.input.proposedExtension === 'number' ? request.input.proposedExtension : '?';
+    console.log('Continue execution?');
+    console.log(`  Current max steps: ${currentSteps}`);
+    console.log(`  Additional steps: +${proposedExtension}`);
+
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+    try {
+      const answer = (await rl.question('Continue? [y/N] ')).trim().toLowerCase();
+      return answer === 'y' || answer === 'yes';
+    } finally {
+      rl.close();
+    }
+  }
+
   console.log('Permission required:');
   console.log(`  Tool: ${request.tool}`);
   console.log(`  Permission: ${request.permission}`);

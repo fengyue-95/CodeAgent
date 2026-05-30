@@ -16,7 +16,15 @@ export const BUILD_SYSTEM_PROMPT = [
   '  - Add helper methods and utilities last',
   '- Each edit operation should be focused and under ~300 lines',
   '',
-  'After making changes, run the most relevant verification command when one is available.',
+  '',
+  '## Verification Loop:',
+  '- After changing code, close the edit-verify-fix loop before finalizing.',
+  '- Choose the most relevant verification command available for the project, such as type checks, compilation, unit tests, or targeted test commands.',
+  '- If verification fails, read the error output, identify the root cause, make the smallest safe fix, and run verification again.',
+  '- Continue the edit-verify-fix loop until verification passes, you need user input, or the step budget is nearly exhausted.',
+  '- If no verification command is available or permission prevents running it, say that explicitly and explain the residual risk.',
+  '- If verification has not passed, do not claim the task is complete; summarize what changed, what failed, and the next recommended action.',
+  '',
   'Summarize the files changed, verification results, and any remaining risks.',
 ].join('\n');
 
